@@ -1,0 +1,1252 @@
+const views = {
+  dashboard: document.getElementById("view-dashboard"),
+  history: document.getElementById("view-history"),
+  coins: document.getElementById("view-coins"),
+  compare: document.getElementById("view-compare"),
+  settings: document.getElementById("view-settings"),
+};
+
+const dashboardGrid = document.getElementById("dashboardGrid");
+const groupFilters = document.getElementById("groupFilters");
+const refreshGroupBtn = document.getElementById("refreshGroupBtn");
+const refreshBtn = document.getElementById("refreshBtn");
+const autoRefreshBtn = document.getElementById("autoRefreshBtn");
+const statusBadge = document.getElementById("statusBadge");
+const lastRunEl = document.getElementById("lastRun");
+const autoRefreshEl = document.getElementById("autoRefresh");
+const gridLayoutEl = document.getElementById("gridLayout");
+
+const historyList = document.getElementById("historyList");
+const historyDetail = document.getElementById("historyDetail");
+const historyMeta = document.getElementById("historyMeta");
+const historyGrid = document.getElementById("historyGrid");
+const historyBackBtn = document.getElementById("historyBackBtn");
+
+const addCoinForm = document.getElementById("addCoinForm");
+const coinFormError = document.getElementById("coinFormError");
+const coinsTable = document.getElementById("coinsTable");
+
+const settingsForm = document.getElementById("settingsForm");
+const settingsFormError = document.getElementById("settingsFormError");
+const settingsFormSuccess = document.getElementById("settingsFormSuccess");
+const tvSessionStatus = document.getElementById("tvSessionStatus");
+const tvLoginBtn = document.getElementById("tvLoginBtn");
+const tvSaveLoginBtn = document.getElementById("tvSaveLoginBtn");
+
+const lightbox = document.getElementById("lightbox");
+const lightboxImg = document.getElementById("lightboxImg");
+const lightboxCaption = document.getElementById("lightboxCaption");
+const compareGrid = document.getElementById("compareGrid");
+const clearCompareBtn = document.getElementById("clearCompareBtn");
+
+let statusPollTimer = null;
+let autoWatchTimer = null;
+let currentView = "dashboard";
+let cachedCoins = [];
+let cachedGroups = [];
+let activeGroup = "all";
+let compareSelection = new Set();
+let lastRenderedAt = null;
+let lastProgressKey = "";
+let currentSettings = {
+  autoRefreshMinutes: 5,
+  columnsPerRow: 3,
+  autoRefreshEnabled: true,
+  autoRefreshMs: 300000,
+  chartInterval: "15",
+  chartLayoutId: "",
+  alertThresholdPercent: 3,
+};
+
+function tradingViewLink(symbol) {
+  const params = new URLSearchParams({
+    symbol,
+    interval: currentSettings.chartInterval || "15",
+  });
+
+  const layoutId = currentSettings.chartLayoutId?.trim();
+  if (layoutId) {
+    return `https://www.tradingview.com/chart/${layoutId}/?${params.toString()}`;
+  }
+
+  return `https://www.tradingview.com/chart/?${params.toString()}`;
+}
+
+function binanceLink(symbol) {
+  const pair = symbol.replace(/^[^:]+:/i, "").toUpperCase();
+  return `https://www.binance.com/en/futures/${pair}`;
+}
+
+function formatTime(iso) {
+  if (!iso) return "—";
+  return new Date(iso).toLocaleString();
+}
+
+function applyGridColumns(columns) {
+  document.querySelectorAll(".grid").forEach((grid) => {
+    grid.style.setProperty("--grid-cols", columns);
+  });
+}
+
+function applySettings(settings) {
+  currentSettings = settings;
+  applyGridColumns(settings.columnsPerRow);
+  gridLayoutEl.textContent = `Layout: ${settings.columnsPerRow} per row`;
+  updateAutoRefreshUI(settings.autoRefreshEnabled, settings.autoRefreshMs);
+}
+
+function setBadge(text, className) {
+  statusBadge.textContent = text;
+  statusBadge.className = `badge ${className}`;
+}
+
+function openLightbox(src, caption) {
+  lightboxImg.src = src;
+  lightboxImg.alt = caption;
+  lightboxCaption.textContent = caption;
+  lightbox.classList.remove("hidden");
+  document.body.style.overflow = "hidden";
+}
+
+function closeLightbox() {
+  lightbox.classList.add("hidden");
+  lightboxImg.src = "";
+  document.body.style.overflow = "";
+}
+
+function formatDuration(ms) {
+  if (ms == null || ms < 0) return "";
+  const sec = ms / 1000;
+  if (sec < 60) return `${sec.toFixed(1)}s`;
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return `${m}m ${s}s`;
+}
+
+function getTitleDuration(coinId, { running, progress, resultMap }) {
+  const fromResult = resultMap[coinId]?.durationMs;
+  if (fromResult != null) return formatDuration(fromResult);
+
+  if (running && progress) {
+    const partial = progress.partialResults?.find((r) => r.coin === coinId);
+    if (partial?.durationMs != null) return formatDuration(partial.durationMs);
+  }
+
+  return "";
+}
+
+function progressKey(progress) {
+  if (!progress) return "";
+  const done = progress.partialResults?.map((r) => `${r.coin}:${r.status}`).join(",") || "";
+  return `${progress.currentCoin || ""}|${done}`;
+}
+
+function isCaptureTarget(coin, progress) {
+  if (!progress) return true;
+  if (progress.singleCoin) {
+    return progress.singleCoin === coin.id || progress.currentCoin === coin.id;
+  }
+  if (progress.group) {
+    return coin.group === progress.group;
+  }
+  return true;
+}
+
+function filterCoinsForView(coins) {
+  if (activeGroup === "all") return coins;
+  return coins.filter((c) => c.group === activeGroup);
+}
+
+function formatPrice(price) {
+  if (price == null) return "—";
+  if (price >= 1000) return price.toLocaleString(undefined, { maximumFractionDigits: 0 });
+  if (price >= 1) return price.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  return price.toLocaleString(undefined, { maximumFractionDigits: 6 });
+}
+
+function renderAlertBadges(alert) {
+  if (!alert || alert.status !== "ok") return "";
+
+  const parts = [];
+  if (alert.nearHigh) {
+    parts.push('<span class="alert-badge high">24H HIGH</span>');
+  } else if (alert.nearLow) {
+    parts.push('<span class="alert-badge low">24H LOW</span>');
+  }
+
+  if (alert.changeSinceCapture != null) {
+    const sign = alert.changeSinceCapture >= 0 ? "+" : "";
+    const cls = alert.bigMove
+      ? alert.changeSinceCapture >= 0
+        ? "up"
+        : "down"
+      : "flat";
+    parts.push(
+      `<span class="alert-badge ${cls}">${sign}${alert.changeSinceCapture.toFixed(1)}% SS</span>`
+    );
+  }
+
+  if (alert.change24h != null) {
+    const sign = alert.change24h >= 0 ? "+" : "";
+    parts.push(
+      `<span class="alert-badge flat">${sign}${alert.change24h.toFixed(1)}% 24h</span>`
+    );
+  }
+
+  if (parts.length === 0) return "";
+  return `<div class="alert-badges">${parts.join("")}</div>`;
+}
+
+function getCoinVisualState(coin, { running, progress, resultMap }) {
+  const result = resultMap[coin.id];
+
+  if (running && progress) {
+    if (!isCaptureTarget(coin, progress)) {
+      if (result?.status === "error") {
+        return { type: "error", error: result.error };
+      }
+      return { type: "image", live: false };
+    }
+
+    const partial = progress.partialResults?.find((r) => r.coin === coin.id);
+    if (partial?.status === "error") {
+      return { type: "error", error: partial.error };
+    }
+    if (partial?.status === "ok") {
+      return { type: "image", live: true };
+    }
+    if (progress.currentCoin === coin.id) {
+      return { type: "loading", label: "Capturing..." };
+    }
+    return { type: "waiting", label: "Waiting..." };
+  }
+
+  if (result?.status === "error") {
+    return { type: "error", error: result.error };
+  }
+
+  return { type: "image", live: false };
+}
+
+function renderCardImage(coin, imageUrl, visual, cacheBust) {
+  if (visual.type === "loading") {
+    return `
+      <div class="card-loading">
+        <div class="spinner-sm" aria-hidden="true"></div>
+        <span>Capturing... <strong class="card-loading-timer">0.0s</strong></span>
+      </div>
+    `;
+  }
+
+  if (visual.type === "waiting") {
+    return `<div class="card-loading waiting"><span>${visual.label}</span></div>`;
+  }
+
+  if (visual.type === "error") {
+    return `<div class="placeholder">Capture failed</div>`;
+  }
+
+  const bust = cacheBust ? `?t=${encodeURIComponent(cacheBust)}` : "";
+  const fullSrc = `${imageUrl}${bust}`;
+
+  return `
+    <img
+      class="ss-thumb"
+      src="${fullSrc}"
+      alt="${coin.name} chart"
+      data-full-src="${fullSrc}"
+      data-caption="${coin.name} (${coin.symbol})"
+      onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';"
+    />
+    <div class="placeholder" style="display:none">No screenshot yet</div>
+  `;
+}
+
+let durationTickTimer = null;
+let liveCaptureProgress = null;
+
+function stopDurationTicker() {
+  if (durationTickTimer) {
+    clearInterval(durationTickTimer);
+    durationTickTimer = null;
+  }
+  liveCaptureProgress = null;
+}
+
+function updateDurationLabels() {
+  const progress = liveCaptureProgress;
+  if (!progress) return;
+
+  const now = Date.now();
+
+  dashboardGrid.querySelectorAll("[data-coin-id]").forEach((card) => {
+    const coinId = card.dataset.coinId;
+    const headerDuration = card.querySelector(".card-duration");
+    const loadTimer = card.querySelector(".card-loading-timer");
+    if (!headerDuration) return;
+
+    const partial = progress.partialResults?.find((r) => r.coin === coinId);
+    if (partial?.durationMs != null) {
+      const label = formatDuration(partial.durationMs);
+      headerDuration.textContent = ` · ${label}`;
+      if (loadTimer) loadTimer.textContent = "";
+      return;
+    }
+
+    if (progress.currentCoin === coinId && progress.currentCoinStartedAt) {
+      const label = formatDuration(now - progress.currentCoinStartedAt);
+      headerDuration.textContent = ` · ${label}`;
+      if (loadTimer) loadTimer.textContent = label;
+      return;
+    }
+
+    if (!partial) {
+      headerDuration.textContent = "";
+      if (loadTimer) loadTimer.textContent = "";
+    }
+  });
+}
+
+function startDurationTicker(progress) {
+  liveCaptureProgress = progress;
+  updateDurationLabels();
+  if (durationTickTimer) return;
+  durationTickTimer = setInterval(updateDurationLabels, 100);
+}
+
+function attachCoinRefreshHandlers(container, captureRunning) {
+  container.querySelectorAll("[data-refresh-coin]").forEach((btn) => {
+    btn.disabled = captureRunning;
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      refreshSingleCoin(btn.dataset.refreshCoin);
+    });
+  });
+}
+
+function attachScreenshotHandlers(container) {
+  container.querySelectorAll(".ss-thumb").forEach((img) => {
+    const wrap = img.closest(".card-image-wrap");
+    if (wrap) wrap.classList.add("is-clickable");
+
+    img.addEventListener("click", () => {
+      openLightbox(img.dataset.fullSrc, img.dataset.caption);
+    });
+  });
+}
+
+function showView(name) {
+  currentView = name;
+  document.querySelectorAll(".menu-item").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.view === name);
+  });
+  Object.entries(views).forEach(([key, el]) => {
+    el.classList.toggle("active", key === name);
+  });
+
+  if (name === "history") loadHistoryList();
+  if (name === "coins") loadCoinsTable();
+  if (name === "settings") loadSettingsForm();
+  if (name === "compare") renderCompareView();
+}
+
+function renderGroupFilters() {
+  const groups = [{ id: "all", label: "All" }, ...cachedGroups];
+  groupFilters.innerHTML = groups
+    .map(
+      (g) => `
+      <button type="button" class="group-filter ${activeGroup === g.id ? "active" : ""}" data-group="${g.id}">
+        ${g.label}
+      </button>
+    `
+    )
+    .join("");
+
+  groupFilters.querySelectorAll(".group-filter").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      activeGroup = btn.dataset.group;
+      renderGroupFilters();
+      refreshDashboard({ forceImages: false });
+    });
+  });
+
+  refreshGroupBtn.disabled = activeGroup === "all";
+  refreshGroupBtn.textContent =
+    activeGroup === "all" ? "Refresh Group" : `Refresh ${activeGroup}`;
+}
+
+function renderCoinGrid(container, coins, options = {}) {
+  const {
+    resultMap = {},
+    imageBase = "",
+    cacheBust = "",
+    running = false,
+    progress = null,
+    showActions = true,
+  } = options;
+
+  if (coins.length === 0) {
+    container.innerHTML = `<p class="empty-state">No coins in this group. Add coins or change the filter.</p>`;
+    return;
+  }
+
+  container.innerHTML = coins
+    .map((coin) => {
+      const imageUrl = coin.imageUrl || `${imageBase}${coin.id}.png`;
+      const visual = getCoinVisualState(coin, { running, progress, resultMap });
+      const titleDuration = getTitleDuration(coin.id, { running, progress, resultMap });
+      const coinBust =
+        visual.type === "image" && visual.live
+          ? `live-${coin.id}-${progress?.partialResults?.length || 0}`
+          : cacheBust;
+      const picked = compareSelection.has(coin.id);
+
+      return `
+        <article class="card ${coin.pinned ? "pinned-card" : ""}" data-coin-id="${coin.id}">
+          <div class="card-header">
+            <div class="card-title-row">
+              <h3>${coin.name}<span class="card-duration">${titleDuration ? ` · ${titleDuration}` : ""}</span></h3>
+              ${
+                showActions
+                  ? `<div class="card-header-actions">
+                      <button type="button" class="btn-pin ${coin.pinned ? "active" : ""}" data-pin-coin="${coin.id}" title="Pin ${coin.name}">★</button>
+                      <button type="button" class="btn-compare-pick ${picked ? "active" : ""}" data-compare-coin="${coin.id}" title="Add to compare">⇔</button>
+                      <button type="button" class="btn-coin-refresh" data-refresh-coin="${coin.id}" title="Refresh ${coin.name}" ${running ? "disabled" : ""}>↻</button>
+                    </div>`
+                  : ""
+              }
+            </div>
+            <div class="card-meta-row">
+              <span class="card-symbol">${coin.symbol} · ${coin.group}</span>
+              ${renderAlertBadges(coin.alert)}
+            </div>
+          </div>
+          <div class="card-image-wrap">
+            ${renderCardImage(coin, imageUrl, visual, coinBust)}
+          </div>
+          <div class="card-footer">
+            <a href="${tradingViewLink(coin.symbol)}" target="_blank" rel="noopener">Open on TradingView</a>
+            · <a href="${binanceLink(coin.symbol)}" target="_blank" rel="noopener">Open on Binance Futures</a>
+            ${coin.alert?.price != null ? ` · $${formatPrice(coin.alert.price)}` : ""}
+            ${visual.type === "error" ? ` · <span class="text-error">${visual.error}</span>` : ""}
+          </div>
+        </article>
+      `;
+    })
+    .join("");
+
+  attachScreenshotHandlers(container);
+  if (showActions) {
+    attachCoinRefreshHandlers(container, running);
+    attachPinCompareHandlers(container, running);
+  }
+
+  if (running && progress) {
+    startDurationTicker(progress);
+  }
+}
+
+function attachPinCompareHandlers(container, captureRunning) {
+  container.querySelectorAll("[data-pin-coin]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      togglePin(btn.dataset.pinCoin);
+    });
+  });
+
+  container.querySelectorAll("[data-compare-coin]").forEach((btn) => {
+    btn.disabled = false;
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleComparePick(btn.dataset.compareCoin);
+    });
+  });
+}
+
+async function togglePin(coinId) {
+  const coin = cachedCoins.find((c) => c.id === coinId);
+  if (!coin) return;
+
+  try {
+    const res = await fetch(`/api/coins/${encodeURIComponent(coinId)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pinned: !coin.pinned }),
+    });
+    const data = await parseJsonResponse(res);
+    if (!res.ok) throw new Error(data.error);
+    await refreshDashboard({ reRender: true });
+    if (currentView === "coins") await loadCoinsTable();
+  } catch (err) {
+    alert(err.message || "Failed to update pin");
+  }
+}
+
+function toggleComparePick(coinId) {
+  if (compareSelection.has(coinId)) {
+    compareSelection.delete(coinId);
+  } else {
+    if (compareSelection.size >= 4) {
+      alert("Compare supports up to 4 coins. Remove one first.");
+      return;
+    }
+    compareSelection.add(coinId);
+  }
+  refreshDashboard({ reRender: true });
+}
+
+function renderCompareView() {
+  const selected = cachedCoins.filter((c) => compareSelection.has(c.id));
+
+  if (selected.length < 2) {
+    compareGrid.innerHTML = `<p class="empty-state">Select 2–4 coins using the ⇔ button on the Dashboard.</p>`;
+    return;
+  }
+
+  const cacheBust = lastRenderedAt || Date.now();
+  compareGrid.innerHTML = selected
+    .map((coin) => {
+      const src = `${coin.imageUrl}?t=${encodeURIComponent(cacheBust)}`;
+      return `
+        <article class="compare-card">
+          <div class="compare-card-header">
+            <strong>${coin.name}</strong>
+            <div class="card-meta-row">
+              <span class="card-symbol">${coin.symbol}</span>
+              ${renderAlertBadges(coin.alert)}
+            </div>
+          </div>
+          <img class="ss-thumb" src="${src}" data-full-src="${src}" data-caption="${coin.name} (${coin.symbol})" alt="${coin.name}" />
+        </article>
+      `;
+    })
+    .join("");
+
+  attachScreenshotHandlers(compareGrid);
+}
+
+async function parseJsonResponse(res) {
+  const text = await res.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(
+      res.ok
+        ? "Invalid response from server — try restarting the app."
+        : `Server error (${res.status}) — restart the app if this keeps happening.`
+    );
+  }
+}
+
+async function fetchDashboard() {
+  const res = await fetch("/api/coins");
+  return res.json();
+}
+
+async function fetchStatus() {
+  const res = await fetch("/api/status");
+  return res.json();
+}
+
+function updateAutoRefreshUI(enabled, intervalMs) {
+  autoRefreshBtn.textContent = enabled ? "Stop Auto-refresh" : "Start Auto-refresh";
+  autoRefreshBtn.classList.toggle("btn-danger", enabled);
+  autoRefreshBtn.classList.toggle("btn-secondary", !enabled);
+
+  const minutes = Math.round(intervalMs / 60000);
+  autoRefreshEl.textContent = enabled
+    ? `Auto-refresh: every ${minutes} minutes (running)`
+    : `Auto-refresh: stopped`;
+}
+
+function updateStatusUI(state, settings) {
+  if (state.running) {
+    setBadge("Capturing...", "running");
+    refreshBtn.disabled = true;
+    refreshGroupBtn.disabled = true;
+  } else {
+    stopDurationTicker();
+    if (state.error) {
+      setBadge("Error", "error");
+    } else {
+      setBadge("Ready", "ready");
+    }
+    refreshBtn.disabled = false;
+    refreshGroupBtn.disabled = activeGroup === "all";
+  }
+
+  lastRunEl.textContent = `Last update: ${formatTime(state.lastRun?.at)} (${state.lastRun?.trigger || "—"})`;
+  if (settings) applySettings(settings);
+}
+
+function renderDashboardGrid(coins, state, captureAt) {
+  const resultMap = Object.fromEntries(
+    (state.lastResults || []).map((r) => [r.coin, r])
+  );
+
+  renderCoinGrid(dashboardGrid, filterCoinsForView(coins), {
+    resultMap,
+    cacheBust: captureAt || "",
+    running: state.running,
+    progress: state.progress,
+  });
+}
+
+async function loadDashboardImages(captureAt, state, coins) {
+  if (!coins) {
+    const data = await fetchDashboard();
+    cachedCoins = data.coins;
+    cachedGroups = data.groups || cachedGroups;
+    coins = data.coins;
+    state = state || data.state;
+  }
+
+  renderDashboardGrid(coins, state || { running: false, lastResults: [] }, captureAt);
+  lastRenderedAt = captureAt || lastRenderedAt;
+
+  if (currentView === "compare") {
+    renderCompareView();
+  }
+}
+
+async function refreshDashboard({ forceImages = false, reRender = false } = {}) {
+  try {
+    const data = await fetchDashboard();
+    cachedCoins = data.coins;
+    cachedGroups = data.groups || cachedGroups;
+    renderGroupFilters();
+    updateStatusUI(data.state, data.settings);
+
+    const captureAt = data.state.lastRun?.at;
+    const progressK = progressKey(data.state.progress);
+
+    if (data.state.running) {
+      if (progressK !== lastProgressKey || forceImages || reRender) {
+        lastProgressKey = progressK;
+        renderDashboardGrid(data.coins, data.state, captureAt);
+      }
+      return;
+    }
+
+    lastProgressKey = "";
+    if (
+      forceImages ||
+      reRender ||
+      (captureAt && captureAt !== lastRenderedAt) ||
+      dashboardGrid.children.length === 0
+    ) {
+      await loadDashboardImages(captureAt, data.state, data.coins);
+    } else if (currentView === "compare") {
+      renderCompareView();
+    }
+  } catch {
+    setBadge("Offline", "error");
+  }
+}
+
+async function pollCaptureStatus() {
+  if (currentView !== "dashboard" && currentView !== "compare") return;
+
+  try {
+    const data = await fetchStatus();
+    const captureAt = data.lastRun?.at;
+    const wasRendering = lastRenderedAt;
+    const progressK = progressKey(data.progress);
+
+    updateStatusUI(
+      {
+        running: data.running,
+        lastRun: data.lastRun,
+        error: data.error,
+      },
+      data.settings
+    );
+
+    if (data.running) {
+      if (progressK !== lastProgressKey) {
+        lastProgressKey = progressK;
+        const dash = await fetchDashboard();
+        cachedCoins = dash.coins;
+        renderDashboardGrid(dash.coins, data, captureAt);
+      } else {
+        liveCaptureProgress = data.progress;
+        updateDurationLabels();
+      }
+      return;
+    }
+
+    stopDurationTicker();
+
+    lastProgressKey = "";
+    if (captureAt && captureAt !== wasRendering) {
+      await loadDashboardImages(captureAt, data);
+      if (currentView === "compare") renderCompareView();
+      stopStatusPoll();
+    } else if (!captureAt) {
+      stopStatusPoll();
+    }
+  } catch {
+    setBadge("Offline", "error");
+    stopStatusPoll();
+  }
+}
+
+function startStatusPoll() {
+  if (statusPollTimer) return;
+  statusPollTimer = setInterval(pollCaptureStatus, 1000);
+}
+
+function stopStatusPoll() {
+  if (statusPollTimer) {
+    clearInterval(statusPollTimer);
+    statusPollTimer = null;
+  }
+}
+
+function startAutoWatch() {
+  if (autoWatchTimer) return;
+  autoWatchTimer = setInterval(async () => {
+    if (currentView !== "dashboard" || statusPollTimer) return;
+
+    try {
+      const data = await fetchStatus();
+      const captureAt = data.lastRun?.at;
+
+      if (data.running) {
+        startStatusPoll();
+        await pollCaptureStatus();
+        return;
+      }
+
+      if (captureAt && captureAt !== lastRenderedAt) {
+        updateStatusUI(
+          { running: false, lastRun: data.lastRun, error: data.error },
+          data.settings
+        );
+        await loadDashboardImages(captureAt, data);
+      }
+    } catch {
+      // Background watch is best-effort.
+    }
+  }, 15000);
+}
+
+async function loadHistoryList() {
+  historyList.classList.remove("hidden");
+  historyDetail.classList.add("hidden");
+  historyBackBtn.classList.add("hidden");
+
+  try {
+    const res = await fetch("/api/history");
+    const { sets } = await res.json();
+
+    if (sets.length === 0) {
+      historyList.innerHTML = `<p class="empty-state">No screenshot sets yet. Run a capture from the Dashboard.</p>`;
+      return;
+    }
+
+    historyList.innerHTML = sets
+      .map(
+        (set) => `
+        <button class="history-item" data-set-id="${set.id}">
+          <div class="history-item-main">
+            <strong>${formatTime(set.at)}</strong>
+            <span class="history-trigger">${set.trigger}</span>
+          </div>
+          <div class="history-item-meta">
+            ${set.successCount}/${set.coinCount} captured · ${set.images.length} images saved
+          </div>
+        </button>
+      `
+      )
+      .join("");
+
+    historyList.querySelectorAll(".history-item").forEach((btn) => {
+      btn.addEventListener("click", () => openHistorySet(btn.dataset.setId));
+    });
+  } catch {
+    historyList.innerHTML = `<p class="empty-state text-error">Failed to load history.</p>`;
+  }
+}
+
+async function openHistorySet(setId) {
+  try {
+    const res = await fetch(`/api/history/${encodeURIComponent(setId)}`);
+    const { set } = await res.json();
+
+    historyList.classList.add("hidden");
+    historyDetail.classList.remove("hidden");
+    historyBackBtn.classList.remove("hidden");
+
+    historyMeta.innerHTML = `
+      <p><strong>Captured:</strong> ${formatTime(set.at)}</p>
+      <p><strong>Trigger:</strong> ${set.trigger}</p>
+      <p><strong>Success:</strong> ${set.successCount}/${set.coinCount}</p>
+    `;
+
+    const imageMap = Object.fromEntries(
+      set.images.map((img) => [img.coinId, img.url])
+    );
+    const resultMap = Object.fromEntries(
+      (set.results || []).map((r) => [r.coin, r])
+    );
+
+    const coins = set.coins.map((c) => ({
+      ...c,
+      imageUrl: imageMap[c.id],
+    }));
+
+    renderCoinGrid(historyGrid, coins, { resultMap, cacheBust: set.id, showActions: false });
+  } catch {
+    historyMeta.innerHTML = `<p class="text-error">Failed to load screenshot set.</p>`;
+  }
+}
+
+async function loadCoinsTable() {
+  try {
+    const data = await fetchDashboard();
+    cachedCoins = data.coins;
+    cachedGroups = data.groups || cachedGroups;
+
+    if (data.coins.length === 0) {
+      coinsTable.innerHTML = `<p class="empty-state">No coins yet. Add one above.</p>`;
+      return;
+    }
+
+    const groupOptions = (id) =>
+      cachedGroups
+        .map(
+          (g) =>
+            `<option value="${g.id}" ${coinGroupSelected(id, g.id)}>${g.label}</option>`
+        )
+        .join("");
+
+    function coinGroupSelected(coinId, groupId) {
+      const coin = data.coins.find((c) => c.id === coinId);
+      return coin?.group === groupId ? "selected" : "";
+    }
+
+    coinsTable.innerHTML = `
+      <table>
+        <thead>
+          <tr>
+            <th>Pin</th>
+            <th>Name</th>
+            <th>Symbol</th>
+            <th>Group</th>
+            <th>ID</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          ${data.coins
+            .map(
+              (coin) => `
+            <tr data-coin-row="${coin.id}">
+              <td>
+                <button type="button" class="btn-pin table-pin ${coin.pinned ? "active" : ""}" data-table-pin="${coin.id}" title="Pin">★</button>
+              </td>
+              <td>${coin.name}</td>
+              <td><code>${coin.symbol}</code></td>
+              <td>
+                <select class="coin-group-select" data-coin-group="${coin.id}">
+                  ${groupOptions(coin.id)}
+                </select>
+              </td>
+              <td><code>${coin.id}</code></td>
+              <td>
+                <button class="btn btn-danger btn-sm" data-remove="${coin.id}">Remove</button>
+              </td>
+            </tr>
+          `
+            )
+            .join("")}
+        </tbody>
+      </table>
+    `;
+
+    coinsTable.querySelectorAll("[data-remove]").forEach((btn) => {
+      btn.addEventListener("click", () => removeCoin(btn.dataset.remove));
+    });
+
+    coinsTable.querySelectorAll("[data-table-pin]").forEach((btn) => {
+      btn.addEventListener("click", () => togglePin(btn.dataset.tablePin));
+    });
+
+    coinsTable.querySelectorAll("[data-coin-group]").forEach((select) => {
+      select.addEventListener("change", () =>
+        updateCoinGroup(select.dataset.coinGroup, select.value)
+      );
+    });
+  } catch {
+    coinsTable.innerHTML = `<p class="empty-state text-error">Failed to load coins.</p>`;
+  }
+}
+
+async function updateCoinGroup(coinId, group) {
+  try {
+    const res = await fetch(`/api/coins/${encodeURIComponent(coinId)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ group }),
+    });
+    const data = await parseJsonResponse(res);
+    if (!res.ok) throw new Error(data.error);
+    await loadCoinsTable();
+    if (currentView === "dashboard") await refreshDashboard({ reRender: true });
+  } catch (err) {
+    alert(err.message || "Failed to update group");
+  }
+}
+
+function showFormError(msg) {
+  coinFormError.textContent = msg;
+  coinFormError.classList.toggle("hidden", !msg);
+}
+
+async function removeCoin(id) {
+  if (!confirm(`Remove ${id} from the coin list?`)) return;
+
+  try {
+    const res = await fetch(`/api/coins/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    });
+    if (!res.ok) {
+      const data = await res.json();
+      throw new Error(data.error);
+    }
+    lastRenderedAt = null;
+    await loadCoinsTable();
+    if (currentView === "dashboard") await refreshDashboard({ forceImages: true });
+  } catch (err) {
+    alert(err.message || "Failed to remove coin");
+  }
+}
+
+document.querySelectorAll(".menu-item").forEach((btn) => {
+  btn.addEventListener("click", () => showView(btn.dataset.view));
+});
+
+historyBackBtn.addEventListener("click", loadHistoryList);
+
+lightbox.querySelectorAll("[data-close-lightbox]").forEach((el) => {
+  el.addEventListener("click", closeLightbox);
+});
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !lightbox.classList.contains("hidden")) {
+    closeLightbox();
+  }
+});
+
+async function refreshGroup() {
+  if (activeGroup === "all") return;
+
+  lastProgressKey = "";
+
+  try {
+    const dash = await fetchDashboard();
+    cachedCoins = dash.coins;
+    const groupCoins = dash.coins.filter((c) => c.group === activeGroup);
+
+    renderDashboardGrid(dash.coins, {
+      running: true,
+      progress: {
+        total: groupCoins.length,
+        partialResults: [],
+        currentCoin: null,
+        currentCoinStartedAt: null,
+        singleCoin: null,
+        group: activeGroup,
+      },
+      lastResults: dash.state.lastResults || [],
+    }, dash.state.lastRun?.at);
+
+    const res = await fetch("/api/capture", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ group: activeGroup }),
+    });
+    const data = await parseJsonResponse(res);
+    if (!res.ok) throw new Error(data.error);
+
+    setBadge("Capturing...", "running");
+    refreshBtn.disabled = true;
+    refreshGroupBtn.disabled = true;
+    startStatusPoll();
+    await pollCaptureStatus();
+  } catch (err) {
+    alert(err.message || "Failed to refresh group");
+    await refreshDashboard({ reRender: true });
+  }
+}
+
+refreshGroupBtn.addEventListener("click", refreshGroup);
+
+clearCompareBtn.addEventListener("click", () => {
+  compareSelection.clear();
+  refreshDashboard({ reRender: true });
+  if (currentView === "compare") renderCompareView();
+});
+
+refreshBtn.addEventListener("click", async () => {
+  refreshBtn.disabled = true;
+  setBadge("Starting...", "running");
+  lastProgressKey = "";
+
+  try {
+    const dash = await fetchDashboard();
+    cachedCoins = dash.coins;
+    renderDashboardGrid(dash.coins, {
+      running: true,
+      progress: {
+        partialResults: [],
+        currentCoin: null,
+        currentCoinStartedAt: null,
+        singleCoin: null,
+      },
+      lastResults: [],
+    }, null);
+
+    const res = await fetch("/api/capture", { method: "POST" });
+    const data = await parseJsonResponse(res);
+    if (!res.ok) throw new Error(data.error);
+    startStatusPoll();
+    await pollCaptureStatus();
+  } catch (err) {
+    setBadge("Error", "error");
+    refreshBtn.disabled = false;
+    alert(err.message || "Capture failed to start");
+  }
+});
+
+async function refreshSingleCoin(coinId) {
+  lastProgressKey = "";
+
+  try {
+    const dash = await fetchDashboard();
+    cachedCoins = dash.coins;
+    renderDashboardGrid(dash.coins, {
+      running: true,
+      progress: {
+        total: 1,
+        partialResults: [],
+        currentCoin: coinId,
+        currentCoinStartedAt: Date.now(),
+        singleCoin: coinId,
+      },
+      lastResults: dash.state.lastResults || [],
+    }, dash.state.lastRun?.at);
+
+    const res = await fetch("/api/capture", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ coinId }),
+    });
+    const data = await parseJsonResponse(res);
+    if (!res.ok) throw new Error(data.error);
+
+    setBadge("Capturing...", "running");
+    refreshBtn.disabled = true;
+    startStatusPoll();
+    await pollCaptureStatus();
+  } catch (err) {
+    alert(err.message || "Failed to refresh coin");
+    await refreshDashboard();
+  }
+}
+
+autoRefreshBtn.addEventListener("click", async () => {
+  const nextEnabled = !currentSettings.autoRefreshEnabled;
+  autoRefreshBtn.disabled = true;
+
+  try {
+    const res = await fetch("/api/auto-refresh", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: nextEnabled }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+
+    applySettings(data.settings);
+  } catch (err) {
+    alert(err.message || "Failed to toggle auto-refresh");
+  } finally {
+    autoRefreshBtn.disabled = false;
+  }
+});
+
+addCoinForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  showFormError("");
+
+  const form = new FormData(addCoinForm);
+  const body = {
+    name: form.get("name"),
+    symbol: form.get("symbol"),
+    id: form.get("id") || undefined,
+    group: form.get("group") || "majors",
+  };
+
+  try {
+    const res = await fetch("/api/coins", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+
+    addCoinForm.reset();
+    lastRenderedAt = null;
+    await loadCoinsTable();
+    if (currentView === "dashboard") await refreshDashboard({ forceImages: true });
+  } catch (err) {
+    showFormError(err.message || "Failed to add coin");
+  }
+});
+
+function showSettingsMessage(errorMsg, successMsg) {
+  settingsFormError.textContent = errorMsg || "";
+  settingsFormError.classList.toggle("hidden", !errorMsg);
+  settingsFormSuccess.textContent = successMsg || "";
+  settingsFormSuccess.classList.toggle("hidden", !successMsg);
+}
+
+function updateTvSessionUI(session) {
+  tvSessionStatus.textContent = session.message;
+  tvSessionStatus.classList.remove("ok", "warn", "error");
+
+  if (session.loginBrowserOpen) {
+    tvSessionStatus.classList.add("warn");
+  } else if (session.loggedIn) {
+    tvSessionStatus.classList.add("ok");
+  } else {
+    tvSessionStatus.classList.add("error");
+  }
+}
+
+async function loadTvSession() {
+  try {
+    const res = await fetch("/api/tradingview/session");
+    const { session } = await res.json();
+    updateTvSessionUI(session);
+  } catch {
+    tvSessionStatus.textContent = "Could not check TradingView login status.";
+    tvSessionStatus.classList.add("error");
+  }
+}
+
+async function loadSettingsForm() {
+  try {
+    const res = await fetch("/api/settings");
+    const { settings } = await res.json();
+    settingsForm.autoRefreshMinutes.value = settings.autoRefreshMinutes;
+    settingsForm.columnsPerRow.value = String(settings.columnsPerRow);
+    settingsForm.chartLayoutId.value = settings.chartLayoutId || "";
+    settingsForm.chartInterval.value = settings.chartInterval || "15";
+    settingsForm.alertThresholdPercent.value = settings.alertThresholdPercent ?? 3;
+    showSettingsMessage("", "");
+    await loadTvSession();
+  } catch {
+    showSettingsMessage("Failed to load settings.", "");
+  }
+}
+
+tvLoginBtn.addEventListener("click", async () => {
+  tvLoginBtn.disabled = true;
+  showSettingsMessage("", "");
+
+  try {
+    const res = await fetch("/api/tradingview/login", { method: "POST" });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+
+    updateTvSessionUI({
+      loggedIn: null,
+      loginBrowserOpen: true,
+      message: data.message || "Login window opened.",
+    });
+    showSettingsMessage("", "Login window opened — sign in, then click Save Login.");
+  } catch (err) {
+    showSettingsMessage(err.message || "Failed to open login window.", "");
+  } finally {
+    tvLoginBtn.disabled = false;
+  }
+});
+
+tvSaveLoginBtn.addEventListener("click", async () => {
+  tvSaveLoginBtn.disabled = true;
+  showSettingsMessage("", "");
+
+  try {
+    const res = await fetch("/api/tradingview/login/save", { method: "POST" });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+
+    updateTvSessionUI(data.session);
+    showSettingsMessage(
+      "",
+      data.session.loggedIn
+        ? "Login saved. Screenshots will use your indicators."
+        : "Login window closed. Sign in and try again if needed."
+    );
+  } catch (err) {
+    showSettingsMessage(err.message || "Failed to save login.", "");
+  } finally {
+    tvSaveLoginBtn.disabled = false;
+  }
+});
+
+settingsForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  showSettingsMessage("", "");
+
+  const form = new FormData(settingsForm);
+  const body = {
+    autoRefreshMinutes: Number(form.get("autoRefreshMinutes")),
+    columnsPerRow: Number(form.get("columnsPerRow")),
+    chartLayoutId: form.get("chartLayoutId"),
+    chartInterval: form.get("chartInterval"),
+    alertThresholdPercent: Number(form.get("alertThresholdPercent")),
+  };
+
+  try {
+    const res = await fetch("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+
+    applySettings(data.settings);
+    showSettingsMessage("", "Settings saved.");
+    if (currentView === "dashboard") {
+      const dash = await fetchDashboard();
+      renderDashboardGrid(dash.coins, dash.state, dash.state.lastRun?.at);
+    }
+  } catch (err) {
+    showSettingsMessage(err.message || "Failed to save settings.", "");
+  }
+});
+
+async function initDashboard() {
+  await refreshDashboard({ forceImages: true });
+
+  try {
+    const data = await fetchStatus();
+    if (data.running) {
+      startStatusPoll();
+      await pollCaptureStatus();
+    }
+  } catch {
+    // Initial status check is best-effort.
+  }
+
+  startAutoWatch();
+}
+
+showView("dashboard");
+initDashboard();

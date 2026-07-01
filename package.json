@@ -1,0 +1,20 @@
+{
+  "name": "tradingview-dashboard",
+  "version": "1.0.0",
+  "description": "TradingView chart screenshot dashboard for crypto coins",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "capture": "node src/capture-once.js",
+    "install:chrome": "puppeteer browsers install chrome",
+    "postinstall": "puppeteer browsers install chrome"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "puppeteer": "^24.2.1"
+  },
+  "allowScripts": {
+    "puppeteer@24.43.1": true
+  }
+}

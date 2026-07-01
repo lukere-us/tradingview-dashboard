@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TradingView Crypto Dashboard</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div class="layout">
+      <aside class="sidebar">
+        <div class="sidebar-brand">
+          <h1>TV Dashboard</h1>
+          <p>Crypto charts</p>
+        </div>
+        <nav class="menu">
+          <button class="menu-item active" data-view="dashboard">
+            <span class="menu-icon">▦</span> Dashboard
+          </button>
+          <button class="menu-item" data-view="history">
+            <span class="menu-icon">◷</span> SS History
+          </button>
+          <button class="menu-item" data-view="coins">
+            <span class="menu-icon">◎</span> Coin List
+          </button>
+          <button class="menu-item" data-view="compare">
+            <span class="menu-icon">⇔</span> Compare
+          </button>
+          <button class="menu-item" data-view="settings">
+            <span class="menu-icon">⚙</span> Settings
+          </button>
+        </nav>
+        <div class="sidebar-footer">
+          <span id="statusBadge" class="badge">Loading...</span>
+        </div>
+      </aside>
+
+      <main class="content">
+        <!-- Dashboard view -->
+        <section id="view-dashboard" class="view active">
+          <header class="page-header">
+            <div>
+              <h2>Live Dashboard</h2>
+              <p class="subtitle">Current screenshot set</p>
+            </div>
+            <div class="header-actions">
+              <button id="autoRefreshBtn" class="btn btn-secondary">Stop Auto-refresh</button>
+              <button id="refreshBtn" class="btn btn-primary">Refresh Screenshots</button>
+            </div>
+          </header>
+          <section class="toolbar">
+            <div id="groupFilters" class="group-filters"></div>
+            <button id="refreshGroupBtn" class="btn btn-secondary btn-sm">Refresh Group</button>
+          </section>
+          <section class="meta">
+            <p id="lastRun">Last update: —</p>
+            <p id="autoRefresh">Auto-refresh: every 5 minutes</p>
+            <p id="gridLayout">Layout: 3 per row</p>
+          </section>
+          <div id="dashboardGrid" class="grid"></div>
+        </section>
+
+        <!-- History view -->
+        <section id="view-history" class="view">
+          <header class="page-header">
+            <div>
+              <h2>Screenshot History</h2>
+              <p class="subtitle">Past capture sets</p>
+            </div>
+            <button id="historyBackBtn" class="btn btn-secondary hidden">← Back to list</button>
+          </header>
+          <div id="historyList" class="history-list"></div>
+          <div id="historyDetail" class="hidden">
+            <div id="historyMeta" class="meta"></div>
+            <div id="historyGrid" class="grid"></div>
+          </div>
+        </section>
+
+        <!-- Coins view -->
+        <section id="view-coins" class="view">
+          <header class="page-header">
+            <div>
+              <h2>Coin List</h2>
+              <p class="subtitle">Add or remove coins to capture</p>
+            </div>
+          </header>
+
+          <form id="addCoinForm" class="coin-form">
+            <div class="form-row">
+              <label>
+                Name
+                <input type="text" name="name" placeholder="Bitcoin" required />
+              </label>
+              <label>
+                TradingView Symbol
+                <input type="text" name="symbol" placeholder="BINANCE:BTCUSDT" required />
+              </label>
+              <label>
+                ID <span class="hint">(optional)</span>
+                <input type="text" name="id" placeholder="btc" />
+              </label>
+              <label>
+                Group
+                <select name="group">
+                  <option value="majors">Majors</option>
+                  <option value="alts">Alts</option>
+                  <option value="memes">Memes</option>
+                </select>
+              </label>
+              <button type="submit" class="btn btn-primary">Add Coin</button>
+            </div>
+            <p id="coinFormError" class="form-error hidden"></p>
+          </form>
+
+          <div id="coinsTable" class="coins-table"></div>
+        </section>
+
+        <!-- Compare view -->
+        <section id="view-compare" class="view">
+          <header class="page-header">
+            <div>
+              <h2>Side-by-Side Compare</h2>
+              <p class="subtitle">Select 2–4 coins on the Dashboard, then open Compare</p>
+            </div>
+            <button id="clearCompareBtn" class="btn btn-secondary">Clear Selection</button>
+          </header>
+          <div id="compareGrid" class="compare-grid"></div>
+        </section>
+
+        <!-- Settings view -->
+        <section id="view-settings" class="view">
+          <header class="page-header">
+            <div>
+              <h2>Settings</h2>
+              <p class="subtitle">Adjust auto-refresh and dashboard layout</p>
+            </div>
+          </header>
+
+          <form id="settingsForm" class="settings-form">
+            <div class="settings-group">
+              <h3>TradingView account</h3>
+              <p id="tvSessionStatus" class="tv-session-status">Checking login...</p>
+              <div class="settings-actions">
+                <button type="button" id="tvLoginBtn" class="btn btn-secondary">
+                  Open Login Window
+                </button>
+                <button type="button" id="tvSaveLoginBtn" class="btn btn-primary">
+                  Save Login
+                </button>
+              </div>
+              <p class="field-hint">
+                Sign in with your TradingView account, add your indicators on a chart, save the layout, then click Save Login. Screenshots will use your saved session and layout.
+              </p>
+            </div>
+
+            <div class="settings-group">
+              <h3>Chart layout</h3>
+              <label>
+                Layout ID <span class="hint">(from chart URL)</span>
+                <input
+                  type="text"
+                  name="chartLayoutId"
+                  placeholder="e.g. AbCdEfGh"
+                />
+              </label>
+              <p class="field-hint">
+                Open your chart with indicators on TradingView. Copy the ID from the URL:
+                <code>tradingview.com/chart/<strong>AbCdEfGh</strong>/</code>
+              </p>
+              <label>
+                Timeframe
+                <select name="chartInterval">
+                  <option value="1">1 minute</option>
+                  <option value="5">5 minutes</option>
+                  <option value="15" selected>15 minutes</option>
+                  <option value="60">1 hour</option>
+                  <option value="240">4 hours</option>
+                  <option value="D">Daily</option>
+                  <option value="W">Weekly</option>
+                </select>
+              </label>
+            </div>
+
+            <div class="settings-group">
+              <h3>Price alerts</h3>
+              <label>
+                Alert threshold (% since last SS)
+                <input
+                  type="number"
+                  name="alertThresholdPercent"
+                  min="0.5"
+                  max="50"
+                  step="0.5"
+                  required
+                />
+              </label>
+              <p class="field-hint">Coins with bigger moves since the last capture show colored badges.</p>
+            </div>
+
+            <div class="settings-group">
+              <h3>Auto-refresh</h3>
+              <label>
+                Interval (minutes)
+                <input
+                  type="number"
+                  name="autoRefreshMinutes"
+                  min="1"
+                  max="1440"
+                  step="1"
+                  required
+                />
+              </label>
+              <p class="field-hint">How often screenshots are captured automatically (1–1440 min).</p>
+            </div>
+
+            <div class="settings-group">
+              <h3>Dashboard layout</h3>
+              <label>
+                Charts per row
+                <select name="columnsPerRow" required>
+                  <option value="1">1 per row</option>
+                  <option value="2">2 per row</option>
+                  <option value="3">3 per row</option>
+                  <option value="4">4 per row</option>
+                  <option value="5">5 per row</option>
+                  <option value="6">6 per row</option>
+                </select>
+              </label>
+              <p class="field-hint">Number of coin charts shown on each row.</p>
+            </div>
+
+            <p id="settingsFormError" class="form-error hidden"></p>
+            <p id="settingsFormSuccess" class="form-success hidden"></p>
+            <button type="submit" class="btn btn-primary">Save Settings</button>
+          </form>
+        </section>
+      </main>
+    </div>
+
+    <div id="lightbox" class="lightbox hidden" role="dialog" aria-modal="true">
+      <div class="lightbox-backdrop" data-close-lightbox></div>
+      <div class="lightbox-panel">
+        <button type="button" class="lightbox-close" data-close-lightbox aria-label="Close">×</button>
+        <div class="lightbox-image-wrap">
+          <img id="lightboxImg" src="" alt="" />
+        </div>
+        <p id="lightboxCaption" class="lightbox-caption"></p>
+      </div>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
