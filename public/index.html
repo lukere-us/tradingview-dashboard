@@ -70,6 +70,7 @@
             <button id="historyBackBtn" class="btn btn-secondary hidden">← Back to list</button>
           </header>
           <div id="historyList" class="history-list"></div>
+          <nav id="historyPagination" class="history-pagination hidden" aria-label="History pagination"></nav>
           <div id="historyDetail" class="hidden">
             <div id="historyMeta" class="meta"></div>
             <div id="historyGrid" class="grid"></div>
@@ -195,6 +196,22 @@
                 />
               </label>
               <p class="field-hint">Coins with bigger moves since the last capture show colored badges.</p>
+            </div>
+
+            <div class="settings-group">
+              <h3>SS History</h3>
+              <label>
+                Sets per page
+                <input
+                  type="number"
+                  name="historyPerPage"
+                  min="5"
+                  max="50"
+                  step="1"
+                  required
+                />
+              </label>
+              <p class="field-hint">How many screenshot sets to show on each history page (5–50).</p>
             </div>
 
             <div class="settings-group">

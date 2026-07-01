@@ -17,6 +17,7 @@ const autoRefreshEl = document.getElementById("autoRefresh");
 const gridLayoutEl = document.getElementById("gridLayout");
 
 const historyList = document.getElementById("historyList");
+const historyPagination = document.getElementById("historyPagination");
 const historyDetail = document.getElementById("historyDetail");
 const historyMeta = document.getElementById("historyMeta");
 const historyGrid = document.getElementById("historyGrid");
@@ -48,6 +49,9 @@ let activeGroup = "all";
 let compareSelection = new Set();
 let lastRenderedAt = null;
 let lastProgressKey = "";
+let lastSignalAnalysisKey = "";
+let cachedHistorySets = [];
+let historyPage = 1;
 let currentSettings = {
   autoRefreshMinutes: 5,
   columnsPerRow: 3,
@@ -56,6 +60,7 @@ let currentSettings = {
   chartInterval: "15",
   chartLayoutId: "",
   alertThresholdPercent: 3,
+  historyPerPage: 10,
 };
 
 function tradingViewLink(symbol) {
@@ -141,6 +146,14 @@ function progressKey(progress) {
   return `${progress.currentCoin || ""}|${done}`;
 }
 
+function signalAnalysisKey(signalAnalysis) {
+  if (!signalAnalysis) return "";
+  if (signalAnalysis.running) {
+    return `run:${signalAnalysis.current || ""}|${signalAnalysis.completed?.join(",") || ""}`;
+  }
+  return `done:${signalAnalysis.completed?.join(",") || ""}`;
+}
+
 function isCaptureTarget(coin, progress) {
   if (!progress) return true;
   if (progress.singleCoin) {
@@ -195,6 +208,50 @@ function renderAlertBadges(alert) {
 
   if (parts.length === 0) return "";
   return `<div class="alert-badges">${parts.join("")}</div>`;
+}
+
+function signalHighlightClass(chartSignal) {
+  if (!chartSignal?.highlight) return "";
+  return `signal-${chartSignal.highlight}`;
+}
+
+function renderTitleSignalResult(chartSignal) {
+  if (!chartSignal || chartSignal.signal === "none") {
+    return `<span class="card-analyze-status none"> · No signal</span>`;
+  }
+
+  const label = chartSignal.signal.toUpperCase();
+  const pos =
+    chartSignal.position === "top"
+      ? " top"
+      : chartSignal.position === "bottom"
+        ? " bottom"
+        : "";
+  const cls = chartSignal.highlight || "flat";
+
+  return `<span class="card-analyze-status ${cls}"> · ${label}${pos}</span>`;
+}
+
+function renderTitleAnalyzeStatus(coin, { signalAnalysis, chartSignal }) {
+  const queue = signalAnalysis?.queue || [];
+  const inQueue = queue.includes(coin.id);
+
+  if (signalAnalysis?.running && inQueue) {
+    if (signalAnalysis.current === coin.id) {
+      return `<span class="card-analyze-status analyzing"> · Scanning chart edge…</span>`;
+    }
+    if (signalAnalysis.completed?.includes(coin.id)) {
+      const sig = signalAnalysis.results?.[coin.id] || chartSignal;
+      return renderTitleSignalResult(sig);
+    }
+    return `<span class="card-analyze-status waiting"> · Waiting for analysis…</span>`;
+  }
+
+  if (chartSignal?.analyzedAt || (chartSignal && chartSignal.signal !== undefined)) {
+    return renderTitleSignalResult(chartSignal);
+  }
+
+  return "";
 }
 
 function getCoinVisualState(coin, { running, progress, resultMap }) {
@@ -344,7 +401,7 @@ function showView(name) {
     el.classList.toggle("active", key === name);
   });
 
-  if (name === "history") loadHistoryList();
+  if (name === "history") refreshHistoryList();
   if (name === "coins") loadCoinsTable();
   if (name === "settings") loadSettingsForm();
   if (name === "compare") renderCompareView();
@@ -382,6 +439,7 @@ function renderCoinGrid(container, coins, options = {}) {
     cacheBust = "",
     running = false,
     progress = null,
+    signalAnalysis = null,
     showActions = true,
   } = options;
 
@@ -400,12 +458,13 @@ function renderCoinGrid(container, coins, options = {}) {
           ? `live-${coin.id}-${progress?.partialResults?.length || 0}`
           : cacheBust;
       const picked = compareSelection.has(coin.id);
+      const signalClass = signalHighlightClass(coin.chartSignal);
 
       return `
         <article class="card ${coin.pinned ? "pinned-card" : ""}" data-coin-id="${coin.id}">
           <div class="card-header">
             <div class="card-title-row">
-              <h3>${coin.name}<span class="card-duration">${titleDuration ? ` · ${titleDuration}` : ""}</span></h3>
+              <h3>${coin.name}<span class="card-duration">${titleDuration ? ` · ${titleDuration}` : ""}</span>${renderTitleAnalyzeStatus(coin, { signalAnalysis, chartSignal: coin.chartSignal })}</h3>
               ${
                 showActions
                   ? `<div class="card-header-actions">
@@ -421,7 +480,7 @@ function renderCoinGrid(container, coins, options = {}) {
               ${renderAlertBadges(coin.alert)}
             </div>
           </div>
-          <div class="card-image-wrap">
+          <div class="card-image-wrap ${signalClass}">
             ${renderCardImage(coin, imageUrl, visual, coinBust)}
           </div>
           <div class="card-footer">
@@ -510,13 +569,15 @@ function renderCompareView() {
       return `
         <article class="compare-card">
           <div class="compare-card-header">
-            <strong>${coin.name}</strong>
+            <strong>${coin.name}${renderTitleAnalyzeStatus(coin, { signalAnalysis: null, chartSignal: coin.chartSignal })}</strong>
             <div class="card-meta-row">
               <span class="card-symbol">${coin.symbol}</span>
               ${renderAlertBadges(coin.alert)}
             </div>
           </div>
-          <img class="ss-thumb" src="${src}" data-full-src="${src}" data-caption="${coin.name} (${coin.symbol})" alt="${coin.name}" />
+          <div class="compare-card-image ${signalHighlightClass(coin.chartSignal)}">
+            <img class="ss-thumb" src="${src}" data-full-src="${src}" data-caption="${coin.name} (${coin.symbol})" alt="${coin.name}" />
+          </div>
         </article>
       `;
     })
@@ -560,7 +621,11 @@ function updateAutoRefreshUI(enabled, intervalMs) {
 }
 
 function updateStatusUI(state, settings) {
-  if (state.running) {
+  if (state.signalAnalysis?.running) {
+    setBadge("Analyzing charts...", "running");
+    refreshBtn.disabled = true;
+    refreshGroupBtn.disabled = true;
+  } else if (state.running) {
     setBadge("Capturing...", "running");
     refreshBtn.disabled = true;
     refreshGroupBtn.disabled = true;
@@ -589,6 +654,7 @@ function renderDashboardGrid(coins, state, captureAt) {
     cacheBust: captureAt || "",
     running: state.running,
     progress: state.progress,
+    signalAnalysis: state.signalAnalysis,
   });
 }
 
@@ -620,9 +686,15 @@ async function refreshDashboard({ forceImages = false, reRender = false } = {}) 
     const captureAt = data.state.lastRun?.at;
     const progressK = progressKey(data.state.progress);
 
-    if (data.state.running) {
-      if (progressK !== lastProgressKey || forceImages || reRender) {
+    if (data.state.running || data.state.signalAnalysis?.running) {
+      if (
+        progressK !== lastProgressKey ||
+        signalAnalysisKey(data.state.signalAnalysis) !== lastSignalAnalysisKey ||
+        forceImages ||
+        reRender
+      ) {
         lastProgressKey = progressK;
+        lastSignalAnalysisKey = signalAnalysisKey(data.state.signalAnalysis);
         renderDashboardGrid(data.coins, data.state, captureAt);
       }
       return;
@@ -652,23 +724,33 @@ async function pollCaptureStatus() {
     const captureAt = data.lastRun?.at;
     const wasRendering = lastRenderedAt;
     const progressK = progressKey(data.progress);
+    const signalK = signalAnalysisKey(data.signalAnalysis);
 
     updateStatusUI(
       {
         running: data.running,
         lastRun: data.lastRun,
         error: data.error,
+        signalAnalysis: data.signalAnalysis,
       },
       data.settings
     );
 
-    if (data.running) {
-      if (progressK !== lastProgressKey) {
+    const stateChanged =
+      progressK !== lastProgressKey || signalK !== lastSignalAnalysisKey;
+
+    if (data.running || data.signalAnalysis?.running) {
+      if (stateChanged) {
         lastProgressKey = progressK;
+        lastSignalAnalysisKey = signalK;
         const dash = await fetchDashboard();
         cachedCoins = dash.coins;
-        renderDashboardGrid(dash.coins, data, captureAt);
-      } else {
+        renderDashboardGrid(
+          dash.coins,
+          { ...data, lastResults: dash.state?.lastResults || data.lastResults },
+          captureAt
+        );
+      } else if (data.running && data.progress) {
         liveCaptureProgress = data.progress;
         updateDurationLabels();
       }
@@ -676,6 +758,9 @@ async function pollCaptureStatus() {
     }
 
     stopDurationTicker();
+
+    lastProgressKey = "";
+    lastSignalAnalysisKey = "";
 
     lastProgressKey = "";
     if (captureAt && captureAt !== wasRendering) {
@@ -712,7 +797,7 @@ function startAutoWatch() {
       const data = await fetchStatus();
       const captureAt = data.lastRun?.at;
 
-      if (data.running) {
+      if (data.running || data.signalAnalysis?.running) {
         startStatusPoll();
         await pollCaptureStatus();
         return;
@@ -731,23 +816,54 @@ function startAutoWatch() {
   }, 15000);
 }
 
-async function loadHistoryList() {
+async function loadHistoryList({ resetPage = false } = {}) {
   historyList.classList.remove("hidden");
+  historyPagination.classList.remove("hidden");
   historyDetail.classList.add("hidden");
   historyBackBtn.classList.add("hidden");
 
-  try {
-    const res = await fetch("/api/history");
-    const { sets } = await res.json();
+  if (resetPage) {
+    historyPage = 1;
+  }
 
-    if (sets.length === 0) {
+  try {
+    if (cachedHistorySets.length === 0) {
+      const res = await fetch("/api/history");
+      const { sets } = await res.json();
+      cachedHistorySets = sets;
+    }
+
+    if (cachedHistorySets.length === 0) {
       historyList.innerHTML = `<p class="empty-state">No screenshot sets yet. Run a capture from the Dashboard.</p>`;
+      historyPagination.classList.add("hidden");
       return;
     }
 
-    historyList.innerHTML = sets
-      .map(
-        (set) => `
+    renderHistoryPage();
+  } catch {
+    historyList.innerHTML = `<p class="empty-state text-error">Failed to load history.</p>`;
+    historyPagination.classList.add("hidden");
+  }
+}
+
+function renderHistoryPage() {
+  const perPage = currentSettings.historyPerPage || 10;
+  const total = cachedHistorySets.length;
+  const totalPages = Math.max(1, Math.ceil(total / perPage));
+
+  if (historyPage > totalPages) {
+    historyPage = totalPages;
+  }
+  if (historyPage < 1) {
+    historyPage = 1;
+  }
+
+  const start = (historyPage - 1) * perPage;
+  const pageSets = cachedHistorySets.slice(start, start + perPage);
+
+  historyList.innerHTML = pageSets
+    .map(
+      (set) => `
         <button class="history-item" data-set-id="${set.id}">
           <div class="history-item-main">
             <strong>${formatTime(set.at)}</strong>
@@ -758,15 +874,53 @@ async function loadHistoryList() {
           </div>
         </button>
       `
-      )
-      .join("");
+    )
+    .join("");
 
-    historyList.querySelectorAll(".history-item").forEach((btn) => {
-      btn.addEventListener("click", () => openHistorySet(btn.dataset.setId));
-    });
-  } catch {
-    historyList.innerHTML = `<p class="empty-state text-error">Failed to load history.</p>`;
+  historyList.querySelectorAll(".history-item").forEach((btn) => {
+    btn.addEventListener("click", () => openHistorySet(btn.dataset.setId));
+  });
+
+  renderHistoryPagination({ total, totalPages, perPage, start });
+}
+
+function renderHistoryPagination({ total, totalPages, perPage, start }) {
+  if (totalPages <= 1) {
+    historyPagination.innerHTML = `
+      <p class="history-page-meta">Showing ${total} set${total === 1 ? "" : "s"} · ${perPage} per page</p>
+    `;
+    historyPagination.classList.remove("hidden");
+    return;
   }
+
+  const end = Math.min(start + perPage, total);
+  historyPagination.innerHTML = `
+    <p class="history-page-meta">Showing ${start + 1}–${end} of ${total} · ${perPage} per page</p>
+    <div class="history-page-controls">
+      <button type="button" class="btn btn-secondary btn-sm" data-history-page="prev" ${historyPage <= 1 ? "disabled" : ""}>← Prev</button>
+      <span class="history-page-label">Page ${historyPage} of ${totalPages}</span>
+      <button type="button" class="btn btn-secondary btn-sm" data-history-page="next" ${historyPage >= totalPages ? "disabled" : ""}>Next →</button>
+    </div>
+  `;
+
+  historyPagination.querySelectorAll("[data-history-page]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      if (btn.dataset.historyPage === "prev" && historyPage > 1) {
+        historyPage -= 1;
+        renderHistoryPage();
+      } else if (btn.dataset.historyPage === "next" && historyPage < totalPages) {
+        historyPage += 1;
+        renderHistoryPage();
+      }
+    });
+  });
+
+  historyPagination.classList.remove("hidden");
+}
+
+async function refreshHistoryList() {
+  cachedHistorySets = [];
+  await loadHistoryList();
 }
 
 async function openHistorySet(setId) {
@@ -775,6 +929,7 @@ async function openHistorySet(setId) {
     const { set } = await res.json();
 
     historyList.classList.add("hidden");
+    historyPagination.classList.add("hidden");
     historyDetail.classList.remove("hidden");
     historyBackBtn.classList.remove("hidden");
 
@@ -1147,6 +1302,7 @@ async function loadSettingsForm() {
     settingsForm.chartLayoutId.value = settings.chartLayoutId || "";
     settingsForm.chartInterval.value = settings.chartInterval || "15";
     settingsForm.alertThresholdPercent.value = settings.alertThresholdPercent ?? 3;
+    settingsForm.historyPerPage.value = settings.historyPerPage ?? 10;
     showSettingsMessage("", "");
     await loadTvSession();
   } catch {
@@ -1210,6 +1366,7 @@ settingsForm.addEventListener("submit", async (e) => {
     chartLayoutId: form.get("chartLayoutId"),
     chartInterval: form.get("chartInterval"),
     alertThresholdPercent: Number(form.get("alertThresholdPercent")),
+    historyPerPage: Number(form.get("historyPerPage")),
   };
 
   try {
@@ -1227,6 +1384,9 @@ settingsForm.addEventListener("submit", async (e) => {
       const dash = await fetchDashboard();
       renderDashboardGrid(dash.coins, dash.state, dash.state.lastRun?.at);
     }
+    if (currentView === "history" && historyDetail.classList.contains("hidden")) {
+      renderHistoryPage();
+    }
   } catch (err) {
     showSettingsMessage(err.message || "Failed to save settings.", "");
   }
@@ -1237,7 +1397,7 @@ async function initDashboard() {
 
   try {
     const data = await fetchStatus();
-    if (data.running) {
+    if (data.running || data.signalAnalysis?.running) {
       startStatusPoll();
       await pollCaptureStatus();
     }

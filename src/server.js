@@ -19,6 +19,45 @@ const {
   closeLoginBrowser,
 } = require("./services/tradingviewSession");
 const { getAlerts, refreshPrices } = require("./services/priceAlerts");
+const { getSignals, updateSignalsForCoins } = require("./services/signalsStore");
+
+function emptySignalAnalysis() {
+  return {
+    running: false,
+    total: 0,
+    queue: [],
+    current: null,
+    completed: [],
+    results: {},
+  };
+}
+
+async function runSignalAnalysis(coinIds) {
+  if (coinIds.length === 0 || captureState.signalAnalysis?.running) return;
+
+  captureState.signalAnalysis = {
+    running: true,
+    total: coinIds.length,
+    queue: coinIds,
+    current: null,
+    completed: [],
+    results: {},
+  };
+
+  try {
+    await updateSignalsForCoins(coinIds, (event) => {
+      if (event.phase === "start") {
+        captureState.signalAnalysis.current = event.coinId;
+      } else if (event.phase === "done") {
+        captureState.signalAnalysis.completed.push(event.coinId);
+        captureState.signalAnalysis.results[event.coinId] = event.result;
+      }
+    });
+  } finally {
+    captureState.signalAnalysis.running = false;
+    captureState.signalAnalysis.current = null;
+  }
+}
 
 const app = express();
 const PORT = process.env.PORT || 3002;
@@ -36,6 +75,7 @@ let captureState = {
   lastResults: [],
   error: null,
   progress: null,
+  signalAnalysis: emptySignalAnalysis(),
 };
 
 function statusPayload() {
@@ -45,6 +85,7 @@ function statusPayload() {
     lastResults: captureState.lastResults,
     error: captureState.error,
     progress: captureState.progress,
+    signalAnalysis: captureState.signalAnalysis,
   };
 }
 
@@ -57,6 +98,7 @@ function settingsPayload() {
     chartLayoutId: settings.chartLayoutId || "",
     chartInterval: settings.chartInterval || "15",
     alertThresholdPercent: settings.alertThresholdPercent ?? 3,
+    historyPerPage: settings.historyPerPage ?? 10,
   };
 }
 
@@ -68,7 +110,7 @@ function scheduleAutoRefresh() {
 
   const interval = autoRefreshMs(settings);
   autoRefreshTimer = setInterval(() => {
-    if (settings.autoRefreshEnabled && !captureState.running) {
+    if (settings.autoRefreshEnabled && !captureState.running && !captureState.signalAnalysis?.running) {
       console.log("Auto-refresh: capturing screenshots...");
       runCapture("auto").catch((err) => {
         console.error("Auto capture failed:", err.message);
@@ -81,7 +123,7 @@ async function runCapture(trigger = "manual", options = {}) {
   const coinId = options.coinId || null;
   const group = options.group || null;
 
-  if (captureState.running) {
+  if (captureState.running || captureState.signalAnalysis?.running) {
     return { skipped: true, reason: "Capture already in progress" };
   }
 
@@ -175,6 +217,14 @@ async function runCapture(trigger = "manual", options = {}) {
       await refreshPrices(captureList, { rotatePrevious: true }).catch((err) => {
         console.error("Price refresh failed:", err.message);
       });
+
+      const okIds = results.filter((r) => r.status === "ok").map((r) => r.coin);
+      if (okIds.length > 0) {
+        captureState.progress = null;
+        await runSignalAnalysis(okIds).catch((err) => {
+          console.error("Chart signal analysis failed:", err.message);
+        });
+      }
     }
 
     return { ok: true, results };
@@ -197,7 +247,7 @@ app.get("/api/settings", (_req, res) => {
 
 app.put("/api/settings", async (req, res) => {
   try {
-    const { autoRefreshMinutes, columnsPerRow, chartLayoutId, chartInterval, alertThresholdPercent } =
+    const { autoRefreshMinutes, columnsPerRow, chartLayoutId, chartInterval, alertThresholdPercent, historyPerPage } =
       req.body;
     const patch = {};
 
@@ -215,6 +265,9 @@ app.put("/api/settings", async (req, res) => {
     }
     if (alertThresholdPercent !== undefined) {
       patch.alertThresholdPercent = alertThresholdPercent;
+    }
+    if (historyPerPage !== undefined) {
+      patch.historyPerPage = historyPerPage;
     }
 
     settings = await updateSettings(patch);
@@ -234,6 +287,7 @@ app.get("/api/coins", async (_req, res) => {
     const coins = await getCoins();
     await refreshPrices(coins, { rotatePrevious: false }).catch(() => {});
     const alerts = await getAlerts(coins, settings.alertThresholdPercent ?? 3);
+    const signals = await getSignals();
 
     res.json({
       coins: coins.map((c) => ({
@@ -244,6 +298,7 @@ app.get("/api/coins", async (_req, res) => {
         pinned: c.pinned,
         imageUrl: `/screenshots/current/${c.id}.png`,
         alert: alerts[c.id] || null,
+        chartSignal: signals[c.id] || { signal: "none", position: null, highlight: null },
       })),
       groups: GROUPS,
       state: statusPayload(),
@@ -394,6 +449,10 @@ app.listen(PORT, async () => {
 
   const coins = await getCoins();
   if (coins.length > 0) {
+    runSignalAnalysis(coins.map((c) => c.id)).catch((err) => {
+      console.error("Initial signal scan failed:", err.message);
+    });
+
     console.log("Starting initial screenshot capture...");
     runCapture("startup").catch((err) => {
       console.error("Startup capture failed:", err.message);

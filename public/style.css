@@ -393,6 +393,50 @@ body {
   margin-top: 0;
 }
 
+.signal-badge {
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  letter-spacing: 0.02em;
+}
+
+.signal-badge.buy {
+  background: #0d2818;
+  color: #4caf50;
+}
+
+.signal-badge.sell {
+  background: #2d1215;
+  color: #ef5350;
+}
+
+.signal-badge.mixed {
+  background: #2a1f00;
+  color: #f9a825;
+}
+
+.compare-card img {
+  width: 100%;
+  display: block;
+  cursor: zoom-in;
+}
+
+.compare-card-image.signal-buy,
+.card-image-wrap.signal-buy {
+  box-shadow: inset 0 0 0 2px #4caf50, 0 0 16px rgba(76, 175, 80, 0.35);
+}
+
+.compare-card-image.signal-sell,
+.card-image-wrap.signal-sell {
+  box-shadow: inset 0 0 0 2px #ef5350, 0 0 16px rgba(239, 83, 80, 0.35);
+}
+
+.compare-card-image.signal-mixed,
+.card-image-wrap.signal-mixed {
+  box-shadow: inset 0 0 0 2px #f9a825, 0 0 16px rgba(249, 168, 37, 0.3);
+}
+
 .btn-coin-refresh {
   flex-shrink: 0;
   width: 30px;
@@ -427,6 +471,40 @@ body {
   color: #5b9cf6;
   font-weight: 500;
   font-size: 0.9em;
+}
+
+.card-analyze-status {
+  font-weight: 500;
+  font-size: 0.82rem;
+  white-space: nowrap;
+}
+
+.card-analyze-status.analyzing {
+  color: #5b9cf6;
+}
+
+.card-analyze-status.waiting {
+  color: #9aa0a6;
+}
+
+.card-analyze-status.none {
+  color: #6b7280;
+}
+
+.card-analyze-status.buy {
+  color: #4caf50;
+}
+
+.card-analyze-status.sell {
+  color: #ef5350;
+}
+
+.card-analyze-status.mixed {
+  color: #f9a825;
+}
+
+.card-analyze-status.flat {
+  color: #9aa0a6;
 }
 
 .card-loading-timer {
@@ -627,6 +705,36 @@ body {
 .history-item-meta {
   font-size: 0.85rem;
   color: #9aa0a6;
+}
+
+.history-pagination {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 1.25rem;
+  padding-top: 1rem;
+  border-top: 1px solid #2a2e39;
+}
+
+.history-page-meta {
+  font-size: 0.85rem;
+  color: #9aa0a6;
+  margin: 0;
+}
+
+.history-page-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.history-page-label {
+  font-size: 0.85rem;
+  color: #e8eaed;
+  min-width: 7rem;
+  text-align: center;
 }
 
 /* Coin form & table */

@@ -11,12 +11,13 @@ const DEFAULT_SETTINGS = {
   chartLayoutId: "",
   chartInterval: "15",
   alertThresholdPercent: 3,
+  historyPerPage: 10,
 };
 
 const MIN_REFRESH_MINUTES = 1;
 const MAX_REFRESH_MINUTES = 1440;
-const MIN_COLUMNS = 1;
-const MAX_COLUMNS = 6;
+const MIN_HISTORY_PER_PAGE = 5;
+const MAX_HISTORY_PER_PAGE = 50;
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
@@ -66,6 +67,11 @@ function normalizeSettings(input = {}) {
       Number(merged.alertThresholdPercent) || DEFAULT_SETTINGS.alertThresholdPercent,
       0.5,
       50
+    ),
+    historyPerPage: clamp(
+      Number(merged.historyPerPage) || DEFAULT_SETTINGS.historyPerPage,
+      MIN_HISTORY_PER_PAGE,
+      MAX_HISTORY_PER_PAGE
     ),
   };
 }
