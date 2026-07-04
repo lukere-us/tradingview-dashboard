@@ -737,6 +737,108 @@ body {
   text-align: center;
 }
 
+/* Signal Chart */
+.inline-label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: #9aa0a6;
+  font-size: 0.85rem;
+}
+
+.inline-label select {
+  background: #1e222d;
+  border: 1px solid #2a2e39;
+  color: #e8eaed;
+  border-radius: 6px;
+  padding: 0.4rem 0.6rem;
+}
+
+.signal-summary .signal-total.buy {
+  color: #4caf50;
+  font-weight: 600;
+}
+
+.signal-summary .signal-total.sell {
+  color: #ef5350;
+  font-weight: 600;
+}
+
+.signal-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin: 1rem 0 1.5rem;
+}
+
+.signal-bar-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 180px) 1fr;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.signal-bar-label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  font-size: 0.8rem;
+  color: #9aa0a6;
+}
+
+.signal-bar-label strong {
+  color: #e8eaed;
+  font-size: 0.9rem;
+}
+
+.signal-bar-track {
+  display: flex;
+  height: 18px;
+  background: #13161f;
+  border: 1px solid #2a2e39;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.signal-bar {
+  height: 100%;
+  min-width: 0;
+}
+
+.signal-bar.buy {
+  background: #4caf50;
+}
+
+.signal-bar.sell {
+  background: #ef5350;
+}
+
+.signal-table {
+  margin-top: 0.5rem;
+}
+
+.signal-cell {
+  white-space: nowrap;
+  font-size: 0.85rem;
+}
+
+.signal-cell.empty {
+  color: #6b7280;
+}
+
+.signal-cell-buy {
+  color: #4caf50;
+}
+
+.signal-cell-sell {
+  color: #ef5350;
+}
+
+.signal-cell-sep {
+  color: #6b7280;
+  margin: 0 0.15rem;
+}
+
 /* Coin form & table */
 .coin-form {
   background: #1a1d26;
@@ -796,20 +898,70 @@ body {
 
 /* Settings */
 .settings-form {
+  background: transparent;
+  border: none;
+  padding: 0;
+  max-width: none;
+}
+
+.settings-panels {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 1.25rem;
+  align-items: start;
+}
+
+.settings-panel {
   background: #1a1d26;
   border: 1px solid #2a2e39;
   border-radius: 12px;
-  padding: 1.5rem;
-  max-width: 480px;
+  padding: 1.25rem 1.35rem;
+  min-width: 0;
+}
+
+.settings-panel-trade {
+  border-color: #3d2f00;
+  box-shadow: 0 0 0 1px rgba(249, 168, 37, 0.08);
+}
+
+.settings-panel-header {
+  margin-bottom: 1.25rem;
+  padding-bottom: 0.85rem;
+  border-bottom: 1px solid #2a2e39;
+}
+
+.settings-panel-header h3 {
+  margin: 0 0 0.25rem;
+  font-size: 1.1rem;
+  color: #e8eaed;
+}
+
+.settings-panel-header p {
+  margin: 0;
+  font-size: 0.85rem;
+  color: #9aa0a6;
+}
+
+.settings-panel-trade .settings-panel-header {
+  border-bottom-color: #5c4a00;
+}
+
+.settings-panel-trade .settings-panel-header h3 {
+  color: #f9a825;
 }
 
 .settings-group {
   margin-bottom: 1.5rem;
 }
 
-.settings-group h3 {
-  font-size: 1rem;
-  margin-bottom: 0.75rem;
+.settings-group:last-child {
+  margin-bottom: 0;
+}
+
+.settings-group h3,
+.settings-group h4 {
+  font-size: 0.95rem;
+  margin: 0 0 0.75rem;
   color: #e8eaed;
 }
 
@@ -819,6 +971,7 @@ body {
   gap: 0.35rem;
   font-size: 0.85rem;
   color: #9aa0a6;
+  margin-bottom: 0.75rem;
 }
 
 .settings-form input,
@@ -829,7 +982,33 @@ body {
   background: #0f1117;
   color: #e8eaed;
   font-size: 0.95rem;
-  max-width: 280px;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.settings-form-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem 1rem;
+  margin-top: 1.25rem;
+  padding: 1rem 1.25rem;
+  background: #1a1d26;
+  border: 1px solid #2a2e39;
+  border-radius: 12px;
+}
+
+.settings-form-footer .form-error,
+.settings-form-footer .form-success {
+  margin: 0;
+  flex: 1 1 auto;
+}
+
+@media (max-width: 960px) {
+  .settings-panels {
+    grid-template-columns: 1fr;
+  }
 }
 
 .settings-actions {
@@ -871,6 +1050,40 @@ body {
 .field-hint {
   font-size: 0.8rem;
   color: #5f6368;
+  margin-top: 0.5rem;
+}
+
+.field-hint.warn-hint {
+  color: #f9a825;
+  background: #2a1f00;
+  border: 1px solid #5c4a00;
+  border-radius: 8px;
+  padding: 0.65rem 0.85rem;
+}
+
+.field-hint.ok {
+  color: #4caf50;
+}
+
+.field-hint.error {
+  color: #ef5350;
+}
+
+.checkbox-label {
+  flex-direction: row !important;
+  align-items: center;
+  gap: 0.55rem !important;
+  margin: 0.5rem 0;
+  max-width: none !important;
+}
+
+.checkbox-label input[type="checkbox"] {
+  width: auto;
+  max-width: none;
+  margin: 0;
+}
+
+.trade-log-table {
   margin-top: 0.5rem;
 }
 

@@ -12,7 +12,12 @@ const {
   getSettings,
   updateSettings,
   autoRefreshMs,
+  publicSettings,
 } = require("./services/settingsStore");
+const {
+  testBinanceConnection,
+  listTrades,
+} = require("./services/binanceTrade");
 const {
   getSessionStatus,
   openLoginBrowser,
@@ -20,6 +25,7 @@ const {
 } = require("./services/tradingviewSession");
 const { getAlerts, refreshPrices } = require("./services/priceAlerts");
 const { getSignals, updateSignalsForCoins } = require("./services/signalsStore");
+const { getSignalStats } = require("./services/signalHistoryStore");
 
 function emptySignalAnalysis() {
   return {
@@ -90,16 +96,7 @@ function statusPayload() {
 }
 
 function settingsPayload() {
-  return {
-    autoRefreshMinutes: settings.autoRefreshMinutes,
-    columnsPerRow: settings.columnsPerRow,
-    autoRefreshEnabled: settings.autoRefreshEnabled,
-    autoRefreshMs: autoRefreshMs(settings),
-    chartLayoutId: settings.chartLayoutId || "",
-    chartInterval: settings.chartInterval || "15",
-    alertThresholdPercent: settings.alertThresholdPercent ?? 3,
-    historyPerPage: settings.historyPerPage ?? 10,
-  };
+  return publicSettings(settings);
 }
 
 function scheduleAutoRefresh() {
@@ -247,27 +244,32 @@ app.get("/api/settings", (_req, res) => {
 
 app.put("/api/settings", async (req, res) => {
   try {
-    const { autoRefreshMinutes, columnsPerRow, chartLayoutId, chartInterval, alertThresholdPercent, historyPerPage } =
-      req.body;
+    const body = req.body || {};
     const patch = {};
 
-    if (autoRefreshMinutes !== undefined) {
-      patch.autoRefreshMinutes = autoRefreshMinutes;
-    }
-    if (columnsPerRow !== undefined) {
-      patch.columnsPerRow = columnsPerRow;
-    }
-    if (chartLayoutId !== undefined) {
-      patch.chartLayoutId = chartLayoutId;
-    }
-    if (chartInterval !== undefined) {
-      patch.chartInterval = chartInterval;
-    }
-    if (alertThresholdPercent !== undefined) {
-      patch.alertThresholdPercent = alertThresholdPercent;
-    }
-    if (historyPerPage !== undefined) {
-      patch.historyPerPage = historyPerPage;
+    const keys = [
+      "autoRefreshMinutes",
+      "columnsPerRow",
+      "chartLayoutId",
+      "chartInterval",
+      "alertThresholdPercent",
+      "historyPerPage",
+      "autoTradeEnabled",
+      "binanceApiKey",
+      "binanceApiSecret",
+      "binanceTestnet",
+      "tradeAmountUsdt",
+      "tradeLeverage",
+      "tradeMarginType",
+      "tradeMode",
+      "tradeTpPercent",
+      "tradeSlPercent",
+    ];
+
+    for (const key of keys) {
+      if (body[key] !== undefined) {
+        patch[key] = body[key];
+      }
     }
 
     settings = await updateSettings(patch);
@@ -280,6 +282,50 @@ app.put("/api/settings", async (req, res) => {
 
 app.get("/api/groups", (_req, res) => {
   res.json({ groups: GROUPS });
+});
+
+app.post("/api/binance/test", async (_req, res) => {
+  try {
+    const result = await testBinanceConnection(settings);
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.get("/api/trades", async (req, res) => {
+  try {
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 50));
+    const trades = await listTrades(limit);
+    res.json({ trades });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/signal-stats", async (req, res) => {
+  try {
+    const days = Math.min(30, Math.max(1, Number(req.query.days) || 7));
+    const coins = await getCoins();
+    const stats = await getSignalStats({
+      days,
+      coinIds: coins.map((c) => c.id),
+    });
+
+    const coinMap = Object.fromEntries(coins.map((c) => [c.id, c]));
+    res.json({
+      days: stats.days,
+      totals: stats.totals,
+      coins: stats.coins.map((row) => ({
+        ...row,
+        name: coinMap[row.coinId]?.name || row.coinId,
+        symbol: coinMap[row.coinId]?.symbol || "",
+        group: coinMap[row.coinId]?.group || "",
+      })),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.get("/api/coins", async (_req, res) => {

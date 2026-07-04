@@ -12,6 +12,16 @@ const DEFAULT_SETTINGS = {
   chartInterval: "15",
   alertThresholdPercent: 3,
   historyPerPage: 10,
+  autoTradeEnabled: false,
+  binanceApiKey: "",
+  binanceApiSecret: "",
+  binanceTestnet: false,
+  tradeAmountUsdt: 2,
+  tradeLeverage: 10,
+  tradeMarginType: "ISOLATED",
+  tradeMode: "long_only",
+  tradeTpPercent: 30,
+  tradeSlPercent: 30,
 };
 
 const MIN_REFRESH_MINUTES = 1;
@@ -23,6 +33,13 @@ const MAX_HISTORY_PER_PAGE = 50;
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
+}
+
+function maskSecret(value) {
+  const s = String(value || "");
+  if (!s) return "";
+  if (s.length <= 8) return "••••••••";
+  return `${s.slice(0, 4)}…${s.slice(-4)}`;
 }
 
 async function loadSettings() {
@@ -45,6 +62,9 @@ function normalizeInterval(value) {
 
 function normalizeSettings(input = {}) {
   const merged = { ...DEFAULT_SETTINGS, ...input };
+  const margin = String(merged.tradeMarginType || "ISOLATED").toUpperCase();
+  const mode = String(merged.tradeMode || "long_only").toLowerCase();
+
   return {
     autoRefreshMinutes: clamp(
       Number(merged.autoRefreshMinutes) || DEFAULT_SETTINGS.autoRefreshMinutes,
@@ -75,6 +95,37 @@ function normalizeSettings(input = {}) {
       MIN_HISTORY_PER_PAGE,
       MAX_HISTORY_PER_PAGE
     ),
+    autoTradeEnabled: Boolean(merged.autoTradeEnabled),
+    binanceApiKey:
+      typeof merged.binanceApiKey === "string" ? merged.binanceApiKey.trim() : "",
+    binanceApiSecret:
+      typeof merged.binanceApiSecret === "string" ? merged.binanceApiSecret.trim() : "",
+    binanceTestnet:
+      typeof merged.binanceTestnet === "boolean"
+        ? merged.binanceTestnet
+        : DEFAULT_SETTINGS.binanceTestnet,
+    tradeAmountUsdt: clamp(
+      Number(merged.tradeAmountUsdt) || DEFAULT_SETTINGS.tradeAmountUsdt,
+      1,
+      100000
+    ),
+    tradeLeverage: clamp(
+      Number(merged.tradeLeverage) || DEFAULT_SETTINGS.tradeLeverage,
+      1,
+      125
+    ),
+    tradeMarginType: margin === "CROSSED" ? "CROSSED" : "ISOLATED",
+    tradeMode: mode === "reversal" ? "reversal" : "long_only",
+    tradeTpPercent: clamp(
+      Number(merged.tradeTpPercent) || DEFAULT_SETTINGS.tradeTpPercent,
+      0.5,
+      90
+    ),
+    tradeSlPercent: clamp(
+      Number(merged.tradeSlPercent) || DEFAULT_SETTINGS.tradeSlPercent,
+      0.5,
+      90
+    ),
   };
 }
 
@@ -91,17 +142,53 @@ async function getSettings() {
 
 async function updateSettings(partial) {
   const current = await loadSettings();
-  return saveSettings({ ...current, ...partial });
+  const patch = { ...partial };
+
+  // Keep existing secrets when form sends blank placeholders.
+  if (patch.binanceApiKey === "" || patch.binanceApiKey == null) {
+    delete patch.binanceApiKey;
+  }
+  if (patch.binanceApiSecret === "" || patch.binanceApiSecret == null) {
+    delete patch.binanceApiSecret;
+  }
+
+  return saveSettings({ ...current, ...patch });
 }
 
 function autoRefreshMs(settings) {
   return settings.autoRefreshMinutes * 60 * 1000;
 }
 
+/** Safe settings for the browser — never includes full API secret. */
+function publicSettings(settings) {
+  return {
+    autoRefreshMinutes: settings.autoRefreshMinutes,
+    columnsPerRow: settings.columnsPerRow,
+    autoRefreshEnabled: settings.autoRefreshEnabled,
+    autoRefreshMs: autoRefreshMs(settings),
+    chartLayoutId: settings.chartLayoutId || "",
+    chartInterval: settings.chartInterval || "15",
+    alertThresholdPercent: settings.alertThresholdPercent ?? 3,
+    historyPerPage: settings.historyPerPage ?? 10,
+    autoTradeEnabled: Boolean(settings.autoTradeEnabled),
+    binanceApiKeyConfigured: Boolean(settings.binanceApiKey),
+    binanceApiSecretConfigured: Boolean(settings.binanceApiSecret),
+    binanceApiKeyMasked: maskSecret(settings.binanceApiKey),
+    binanceTestnet: Boolean(settings.binanceTestnet),
+    tradeAmountUsdt: settings.tradeAmountUsdt,
+    tradeLeverage: settings.tradeLeverage,
+    tradeMarginType: settings.tradeMarginType,
+    tradeMode: settings.tradeMode,
+    tradeTpPercent: settings.tradeTpPercent,
+    tradeSlPercent: settings.tradeSlPercent,
+  };
+}
+
 module.exports = {
   getSettings,
   updateSettings,
   autoRefreshMs,
+  publicSettings,
   MIN_REFRESH_MINUTES,
   MAX_REFRESH_MINUTES,
   MIN_COLUMNS,

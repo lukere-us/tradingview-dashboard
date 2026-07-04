@@ -3,6 +3,7 @@ const views = {
   history: document.getElementById("view-history"),
   coins: document.getElementById("view-coins"),
   compare: document.getElementById("view-compare"),
+  signals: document.getElementById("view-signals"),
   settings: document.getElementById("view-settings"),
 };
 
@@ -33,12 +34,22 @@ const settingsFormSuccess = document.getElementById("settingsFormSuccess");
 const tvSessionStatus = document.getElementById("tvSessionStatus");
 const tvLoginBtn = document.getElementById("tvLoginBtn");
 const tvSaveLoginBtn = document.getElementById("tvSaveLoginBtn");
+const binanceTestBtn = document.getElementById("binanceTestBtn");
+const binanceTestStatus = document.getElementById("binanceTestStatus");
+const binanceKeyStatus = document.getElementById("binanceKeyStatus");
+const binanceSecretStatus = document.getElementById("binanceSecretStatus");
+const tradeLogTable = document.getElementById("tradeLogTable");
 
 const lightbox = document.getElementById("lightbox");
 const lightboxImg = document.getElementById("lightboxImg");
 const lightboxCaption = document.getElementById("lightboxCaption");
 const compareGrid = document.getElementById("compareGrid");
 const clearCompareBtn = document.getElementById("clearCompareBtn");
+const signalDaysSelect = document.getElementById("signalDaysSelect");
+const refreshSignalChartBtn = document.getElementById("refreshSignalChartBtn");
+const signalChartSummary = document.getElementById("signalChartSummary");
+const signalChartBars = document.getElementById("signalChartBars");
+const signalChartTable = document.getElementById("signalChartTable");
 
 let statusPollTimer = null;
 let autoWatchTimer = null;
@@ -405,6 +416,7 @@ function showView(name) {
   if (name === "coins") loadCoinsTable();
   if (name === "settings") loadSettingsForm();
   if (name === "compare") renderCompareView();
+  if (name === "signals") loadSignalChart();
 }
 
 function renderGroupFilters() {
@@ -552,6 +564,112 @@ function toggleComparePick(coinId) {
     compareSelection.add(coinId);
   }
   refreshDashboard({ reRender: true });
+}
+
+function formatDayLabel(day) {
+  const d = new Date(`${day}T12:00:00Z`);
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+async function loadSignalChart() {
+  const days = Number(signalDaysSelect?.value) || 7;
+  signalChartSummary.innerHTML = `<p>Loading signal stats…</p>`;
+  signalChartBars.innerHTML = "";
+  signalChartTable.innerHTML = "";
+
+  try {
+    const res = await fetch(`/api/signal-stats?days=${encodeURIComponent(days)}`);
+    const data = await parseJsonResponse(res);
+    if (!res.ok) throw new Error(data.error);
+
+    renderSignalChart(data);
+  } catch (err) {
+    signalChartSummary.innerHTML = `<p class="text-error">${err.message || "Failed to load signal stats."}</p>`;
+  }
+}
+
+function renderSignalChart(data) {
+  const { days = [], coins = [], totals = { buy: 0, sell: 0 } } = data;
+
+  signalChartSummary.innerHTML = `
+    <p><strong>Buy signals:</strong> <span class="signal-total buy">${totals.buy}</span></p>
+    <p><strong>Sell signals:</strong> <span class="signal-total sell">${totals.sell}</span></p>
+    <p><strong>Range:</strong> ${days[0] || "—"} → ${days[days.length - 1] || "—"}</p>
+  `;
+
+  const maxTotal = Math.max(
+    1,
+    ...coins.map((c) => c.totals.buy + c.totals.sell)
+  );
+
+  if (coins.length === 0) {
+    signalChartBars.innerHTML = `<p class="empty-state">No coins configured.</p>`;
+    signalChartTable.innerHTML = "";
+    return;
+  }
+
+  signalChartBars.innerHTML = coins
+    .map((coin) => {
+      const buyPct = (coin.totals.buy / maxTotal) * 100;
+      const sellPct = (coin.totals.sell / maxTotal) * 100;
+      return `
+        <div class="signal-bar-row">
+          <div class="signal-bar-label">
+            <strong>${coin.name}</strong>
+            <span>${coin.totals.buy} buy · ${coin.totals.sell} sell</span>
+          </div>
+          <div class="signal-bar-track">
+            <div class="signal-bar buy" style="width:${buyPct}%" title="${coin.totals.buy} buy"></div>
+            <div class="signal-bar sell" style="width:${sellPct}%" title="${coin.totals.sell} sell"></div>
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+
+  const dayHeaders = days.map((d) => `<th>${formatDayLabel(d)}</th>`).join("");
+
+  signalChartTable.innerHTML = `
+    <table>
+      <thead>
+        <tr>
+          <th>Coin</th>
+          <th>Buy</th>
+          <th>Sell</th>
+          ${dayHeaders}
+        </tr>
+      </thead>
+      <tbody>
+        ${coins
+          .map((coin) => {
+            const dayCells = days
+              .map((day) => {
+                const cell = coin.days[day] || { buy: 0, sell: 0 };
+                if (cell.buy === 0 && cell.sell === 0) {
+                  return `<td class="signal-cell empty">—</td>`;
+                }
+                return `<td class="signal-cell">
+                  <span class="signal-cell-buy">${cell.buy}</span>
+                  <span class="signal-cell-sep">/</span>
+                  <span class="signal-cell-sell">${cell.sell}</span>
+                </td>`;
+              })
+              .join("");
+
+            return `
+              <tr>
+                <td><strong>${coin.name}</strong><div class="card-symbol">${coin.id}</div></td>
+                <td class="signal-cell-buy"><strong>${coin.totals.buy}</strong></td>
+                <td class="signal-cell-sell"><strong>${coin.totals.sell}</strong></td>
+                ${dayCells}
+              </tr>
+            `;
+          })
+          .join("")}
+      </tbody>
+    </table>
+    <p class="field-hint">Each day cell shows buy / sell counts. A signal is counted once when it newly appears (not on every capture).</p>
+  `;
 }
 
 function renderCompareView() {
@@ -1144,6 +1262,9 @@ clearCompareBtn.addEventListener("click", () => {
   if (currentView === "compare") renderCompareView();
 });
 
+refreshSignalChartBtn?.addEventListener("click", loadSignalChart);
+signalDaysSelect?.addEventListener("change", loadSignalChart);
+
 refreshBtn.addEventListener("click", async () => {
   refreshBtn.disabled = true;
   setBadge("Starting...", "running");
@@ -1293,6 +1414,89 @@ async function loadTvSession() {
   }
 }
 
+function fillBinanceSettings(settings) {
+  settingsForm.autoTradeEnabled.checked = Boolean(settings.autoTradeEnabled);
+  settingsForm.binanceTestnet.checked = Boolean(settings.binanceTestnet);
+  settingsForm.binanceApiKey.value = "";
+  settingsForm.binanceApiSecret.value = "";
+  settingsForm.tradeAmountUsdt.value = settings.tradeAmountUsdt ?? 2;
+  settingsForm.tradeLeverage.value = settings.tradeLeverage ?? 10;
+  settingsForm.tradeMarginType.value = settings.tradeMarginType || "ISOLATED";
+  settingsForm.tradeTpPercent.value = settings.tradeTpPercent ?? 30;
+  settingsForm.tradeSlPercent.value = settings.tradeSlPercent ?? 30;
+  settingsForm.tradeMode.value = settings.tradeMode || "long_only";
+
+  if (binanceKeyStatus) {
+    binanceKeyStatus.textContent = settings.binanceApiKeyConfigured
+      ? `API key: saved (${settings.binanceApiKeyMasked})`
+      : "API key: not set";
+  }
+  if (binanceSecretStatus) {
+    binanceSecretStatus.textContent = settings.binanceApiSecretConfigured
+      ? "Secret key: saved (hidden)"
+      : "Secret key: not set";
+  }
+  if (binanceTestStatus) binanceTestStatus.textContent = "";
+}
+
+async function loadTradeLog() {
+  if (!tradeLogTable) return;
+
+  try {
+    const res = await fetch("/api/trades?limit=20");
+    const data = await parseJsonResponse(res);
+    if (!res.ok) throw new Error(data.error);
+
+    const trades = data.trades || [];
+    if (trades.length === 0) {
+      tradeLogTable.innerHTML = `<p class="empty-state">No auto-trades yet. Enable auto-trade and wait for a new BUY/SELL signal.</p>`;
+      return;
+    }
+
+    tradeLogTable.innerHTML = `
+      <table>
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>Coin</th>
+            <th>Signal</th>
+            <th>Status</th>
+            <th>Details</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${trades
+            .map((t) => {
+              const details =
+                t.status === "error"
+                  ? `<span class="text-error">${t.error || "Failed"}</span>`
+                  : (t.actions || [])
+                      .map((a) => {
+                        if (a.action === "take_profit" || a.action === "stop_loss") {
+                          return `${a.action} @ ${a.stopPrice} (${a.percent}%)`;
+                        }
+                        return `${a.action}${a.quantity != null ? ` ${a.quantity}` : ""}`;
+                      })
+                      .join(", ") || "—";
+              return `
+                <tr>
+                  <td>${formatTime(t.at)}</td>
+                  <td>${t.coinName || t.coinId}<div class="card-symbol">${t.symbol || ""}</div></td>
+                  <td class="signal-cell-${t.signal || "none"}">${(t.signal || "—").toUpperCase()}</td>
+                  <td>${t.status === "ok" ? "OK" : t.status === "error" ? "Error" : t.status || "—"}</td>
+                  <td>${details}</td>
+                </tr>
+              `;
+            })
+            .join("")}
+        </tbody>
+      </table>
+    `;
+  } catch (err) {
+    tradeLogTable.innerHTML = `<p class="empty-state text-error">${err.message || "Failed to load trades."}</p>`;
+  }
+}
+
 async function loadSettingsForm() {
   try {
     const res = await fetch("/api/settings");
@@ -1303,8 +1507,10 @@ async function loadSettingsForm() {
     settingsForm.chartInterval.value = settings.chartInterval || "15";
     settingsForm.alertThresholdPercent.value = settings.alertThresholdPercent ?? 3;
     settingsForm.historyPerPage.value = settings.historyPerPage ?? 10;
+    fillBinanceSettings(settings);
     showSettingsMessage("", "");
     await loadTvSession();
+    await loadTradeLog();
   } catch {
     showSettingsMessage("Failed to load settings.", "");
   }
@@ -1355,6 +1561,32 @@ tvSaveLoginBtn.addEventListener("click", async () => {
   }
 });
 
+binanceTestBtn?.addEventListener("click", async () => {
+  binanceTestBtn.disabled = true;
+  if (binanceTestStatus) binanceTestStatus.textContent = "Testing connection…";
+
+  try {
+    const res = await fetch("/api/binance/test", { method: "POST" });
+    const data = await parseJsonResponse(res);
+    if (!res.ok) throw new Error(data.error);
+
+    if (binanceTestStatus) {
+      binanceTestStatus.textContent = `Connected${data.testnet ? " (testnet)" : ""}. Available: $${Number(data.availableBalance || 0).toFixed(2)} USDT`;
+      binanceTestStatus.classList.remove("error");
+      binanceTestStatus.classList.add("ok");
+    }
+  } catch (err) {
+    if (binanceTestStatus) {
+      binanceTestStatus.textContent = err.message || "Connection failed";
+      binanceTestStatus.classList.remove("ok");
+      binanceTestStatus.classList.add("error");
+      binanceTestStatus.style.whiteSpace = "pre-wrap";
+    }
+  } finally {
+    binanceTestBtn.disabled = false;
+  }
+});
+
 settingsForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   showSettingsMessage("", "");
@@ -1367,7 +1599,20 @@ settingsForm.addEventListener("submit", async (e) => {
     chartInterval: form.get("chartInterval"),
     alertThresholdPercent: Number(form.get("alertThresholdPercent")),
     historyPerPage: Number(form.get("historyPerPage")),
+    autoTradeEnabled: settingsForm.autoTradeEnabled.checked,
+    binanceTestnet: settingsForm.binanceTestnet.checked,
+    tradeAmountUsdt: Number(form.get("tradeAmountUsdt")),
+    tradeLeverage: Number(form.get("tradeLeverage")),
+    tradeMarginType: form.get("tradeMarginType"),
+    tradeTpPercent: Number(form.get("tradeTpPercent")),
+    tradeSlPercent: Number(form.get("tradeSlPercent")),
+    tradeMode: form.get("tradeMode"),
   };
+
+  const apiKey = String(form.get("binanceApiKey") || "").trim();
+  const apiSecret = String(form.get("binanceApiSecret") || "").trim();
+  if (apiKey) body.binanceApiKey = apiKey;
+  if (apiSecret) body.binanceApiSecret = apiSecret;
 
   try {
     const res = await fetch("/api/settings", {
@@ -1379,7 +1624,9 @@ settingsForm.addEventListener("submit", async (e) => {
     if (!res.ok) throw new Error(data.error);
 
     applySettings(data.settings);
+    fillBinanceSettings(data.settings);
     showSettingsMessage("", "Settings saved.");
+    await loadTradeLog();
     if (currentView === "dashboard") {
       const dash = await fetchDashboard();
       renderDashboardGrid(dash.coins, dash.state, dash.state.lastRun?.at);
