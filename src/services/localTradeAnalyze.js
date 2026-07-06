@@ -6,9 +6,9 @@ const { loadHistory } = require("./signalHistoryStore");
 const { getCoins } = require("./coinsStore");
 const { getSettings } = require("./settingsStore");
 const { futuresSymbol } = require("./binanceTrade");
+const { HOLD_CANDLES, holdDurationMs } = require("./signalMemory");
 
 const FORWARD_CAPTURES = 3;
-const HOLD_CAPTURES = 2;
 
 function round2(n) {
   const v = Number(n);
@@ -91,6 +91,14 @@ function tradeTotalsSnapshot(counts) {
     totalPnl: counts.totalPnl || 0,
     winRate: counts.winRate ?? null,
   };
+}
+
+/** Same BUY/SELL episode within hold window — matches live signal memory. */
+function isSameSignalWithinHold(lastActed, lastActedAt, signal, atMs, chartInterval) {
+  if (!lastActed || !lastActedAt || lastActed !== signal) return false;
+  const actedAt = new Date(lastActedAt).getTime();
+  if (!Number.isFinite(actedAt) || !Number.isFinite(atMs)) return false;
+  return atMs - actedAt < holdDurationMs(chartInterval);
 }
 
 
@@ -358,8 +366,9 @@ function summarizeTodayPnl(simulations) {
 async function analyzeCoinAcrossHistory(coin, sets, settings, options = {}) {
   const { onProgress } = options;
   const simulations = [];
-  let lastEntryCaptureIdx = -999;
-  let lastSignal = null;
+  let lastActedSignal = null;
+  let lastActedAt = null;
+  const chartInterval = settings.chartInterval || "15";
 
   let signalsDetected = 0;
   let guidelinesPassed = 0;
@@ -390,7 +399,6 @@ async function analyzeCoinAcrossHistory(coin, sets, settings, options = {}) {
     );
 
     if (!captured.isNewSignal) continue;
-    signalsDetected++;
 
     const { signal, chartResult } = captured;
 
@@ -401,14 +409,24 @@ async function analyzeCoinAcrossHistory(coin, sets, settings, options = {}) {
       imagePath,
     });
     if (!guide.ok) continue;
-    guidelinesPassed++;
 
+    const setAtMs = new Date(set.at).getTime();
     if (
-      lastSignal === signal &&
-      i - lastEntryCaptureIdx < HOLD_CAPTURES
+      isSameSignalWithinHold(
+        lastActedSignal,
+        lastActedAt,
+        signal,
+        setAtMs,
+        chartInterval
+      )
     ) {
       continue;
     }
+
+    signalsDetected++;
+    guidelinesPassed++;
+    lastActedSignal = signal;
+    lastActedAt = set.at;
 
     const prices = await ensureSetPrices(set, [coin]);
     const entryPrice = prices[coin.id];
@@ -447,9 +465,6 @@ async function analyzeCoinAcrossHistory(coin, sets, settings, options = {}) {
 
     simulated++;
     totalPnl += sim.pnlUsdt || 0;
-
-    lastEntryCaptureIdx = i;
-    lastSignal = signal;
 
     const analysis = buildTradeAnalysis({
       coinId: coin.id,
@@ -564,7 +579,7 @@ async function runLocalTradeAnalysis(options = {}) {
     setsUsed: sets.length,
     todaySetsUsed: todaySets.length,
     forwardCaptures: FORWARD_CAPTURES,
-    holdCaptures: HOLD_CAPTURES,
+    holdCandles: HOLD_CANDLES,
     settings: {
       tradeAmountUsdt: settings.tradeAmountUsdt,
       tradeLeverage: settings.tradeLeverage,
@@ -584,6 +599,6 @@ async function runLocalTradeAnalysis(options = {}) {
 module.exports = {
   runLocalTradeAnalysis,
   FORWARD_CAPTURES,
-  HOLD_CAPTURES,
+  HOLD_CANDLES,
   simulateTradeOutcome,
 };

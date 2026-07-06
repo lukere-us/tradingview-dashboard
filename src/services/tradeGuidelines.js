@@ -88,6 +88,12 @@ function enrichTradeJournalEntry(trade) {
   };
 }
 
+/** Trade Journal only includes signals that met the guideline threshold. */
+function tradeJournalGuidelinesPassed(trade) {
+  const enriched = enrichTradeJournalEntry(trade);
+  return enriched.analysis?.guidelinesPassed === true;
+}
+
 /** Future Trend Pro [15m] trading guide — checklist before entry. */
 const BUY_REQUIREMENTS = {
   bias: { value: "green", label: "Bias must be BULLISH (not NEUTRAL)" },
@@ -474,6 +480,7 @@ module.exports = {
   checklistPassStats,
   guidelineStatsFromAnalysis,
   enrichTradeJournalEntry,
+  tradeJournalGuidelinesPassed,
   buildTradeAnalysis,
   statusDisplay,
   TABLE_SEARCH,

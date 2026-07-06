@@ -1,5 +1,5 @@
 const crypto = require("crypto");
-const { enrichTradeJournalEntry } = require("./tradeGuidelines");
+const { enrichTradeJournalEntry, tradeJournalGuidelinesPassed } = require("./tradeGuidelines");
 const fs = require("fs/promises");
 const path = require("path");
 
@@ -507,13 +507,20 @@ async function testBinanceConnection(settings) {
 
 async function listTrades(limit = 50) {
   const log = await loadTradeLog();
-  return log.slice(0, limit).map(enrichTradeJournalEntry);
+  const passed = [];
+  for (const entry of log) {
+    if (!tradeJournalGuidelinesPassed(entry)) continue;
+    passed.push(enrichTradeJournalEntry(entry));
+    if (passed.length >= limit) break;
+  }
+  return passed;
 }
 
 async function getTradeById(id) {
   const log = await loadTradeLog();
   const trade = log.find((t) => t.id === id) || null;
-  return trade ? enrichTradeJournalEntry(trade) : null;
+  if (!trade || !tradeJournalGuidelinesPassed(trade)) return null;
+  return enrichTradeJournalEntry(trade);
 }
 
 module.exports = {

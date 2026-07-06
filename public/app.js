@@ -1143,19 +1143,19 @@ function filterTradeJournalByPeriod(trades) {
 
 function filterTradeJournalTrades(trades) {
   const filter = tradeJournalFilter?.value || "all";
-  const inPeriod = filterTradeJournalByPeriod(trades);
+  const passed = trades.filter((t) => t.analysis?.guidelinesPassed === true);
+  const inPeriod = filterTradeJournalByPeriod(passed);
   if (filter === "all") return inPeriod;
   return inPeriod.filter((t) => t.status === filter);
 }
 
 function tradeJournalEmptyMessage(filter, days = tradeJournalPeriodDays()) {
   const period = days <= 1 ? "for today" : `in the last ${days} days`;
-  if (filter === "ok") return `No executed trades ${period}.`;
-  if (filter === "skipped") return `No blocked trades ${period}.`;
-  if (filter === "error") return `No error entries ${period}.`;
+  if (filter === "ok") return `No executed trades with passed guidelines ${period}.`;
+  if (filter === "error") return `No errors on passed-guideline signals ${period}.`;
   return days <= 1
-    ? "No trade journal entries for today."
-    : `No trade journal entries ${period}.`;
+    ? "No passed-guideline signals for today."
+    : `No passed-guideline signals ${period}.`;
 }
 
 function renderTradeJournalPagination({ total, totalPages, perPage, start, filter, days }) {
@@ -1467,12 +1467,11 @@ function renderPnLReport(report) {
 
 function renderTradeJournalSummary(trades) {
   const executed = trades.filter((t) => t.status === "ok").length;
-  const blocked = trades.filter((t) => t.status === "skipped").length;
   const errors = trades.filter((t) => t.status === "error").length;
 
   tradeJournalSummary.innerHTML = `
-    <p><strong>${trades.length}</strong> total · <span class="trade-status-ok">${executed} executed</span> · <span class="trade-status-blocked">${blocked} blocked</span> · <span class="trade-status-error">${errors} errors</span></p>
-    <p class="field-hint">Guidelines pass at <strong>≥70%</strong> of the Future Trend Pro checklist. Journal entries are re-scored from saved checklist data.</p>
+    <p><strong>${trades.length}</strong> passed signals · <span class="trade-status-ok">${executed} executed</span> · <span class="trade-status-error">${errors} errors</span></p>
+    <p class="field-hint">Only signals with <strong>≥70%</strong> guideline checklist are shown. Blocked (below 70%) entries are excluded.</p>
   `;
 }
 
@@ -1563,9 +1562,9 @@ function renderLocalAnalyzeSummary(data) {
         <span class="pnl-card-sub">${t.wins || 0}W / ${t.losses || 0}L / ${t.openAfter3 || 0} flat</span>
       </div>
       <div class="pnl-card">
-        <span class="pnl-card-label">Signals found</span>
+        <span class="pnl-card-label">Passed signals</span>
         <strong>${t.signalsDetected || 0}</strong>
-        <span class="pnl-card-sub">≥70% checklist pass</span>
+        <span class="pnl-card-sub">≥70% checklist only</span>
       </div>
       <div class="pnl-card">
         <span class="pnl-card-label">SS sets used</span>
@@ -1574,8 +1573,8 @@ function renderLocalAnalyzeSummary(data) {
       </div>
     </div>
     <p class="field-hint">
-      Uses signals saved at capture time (same source as Signal Chart).
-      <strong>Guidelines pass at ≥70%</strong> of the Future Trend Pro checklist (read from each entry screenshot).
+      Uses <strong>passed signals only</strong> (≥70% Future Trend Pro checklist on entry screenshot).
+      Each BUY/SELL counted once per <strong>${s.holdCandles || 2}</strong>-candle hold window (same as live auto-trade).
       Simulates <strong>${s.tradeAmountUsdt || 2} USDT</strong> × <strong>${s.tradeLeverage || 10}x</strong>
       · TP <strong>${s.tradeTpPercent || 30}%</strong> · SL <strong>${s.tradeSlPercent || 30}%</strong>
       · Mode <strong>${s.tradeMode || "long_only"}</strong>
@@ -1605,7 +1604,6 @@ function renderLocalAnalyzeCoinTable(perCoin, activeCoinId = null, { loading = f
         <thead>
           <tr>
             <th>Coin</th>
-            <th>Signals</th>
             <th>Passed</th>
             <th>Trades</th>
             <th>W / L / Open</th>
@@ -1615,7 +1613,7 @@ function renderLocalAnalyzeCoinTable(perCoin, activeCoinId = null, { loading = f
           </tr>
         </thead>
         <tbody>
-          <tr><td colspan="8" class="empty-state">${loading ? "Loading today's analysis…" : "No coins configured."}</td></tr>
+          <tr><td colspan="7" class="empty-state">${loading ? "Loading today's analysis…" : "No coins configured."}</td></tr>
         </tbody>
       </table>
     `;
@@ -1627,7 +1625,6 @@ function renderLocalAnalyzeCoinTable(perCoin, activeCoinId = null, { loading = f
       <thead>
         <tr>
           <th>Coin</th>
-          <th>Signals</th>
           <th>Passed</th>
           <th>Trades</th>
           <th>W / L / Open</th>
@@ -1647,7 +1644,6 @@ function renderLocalAnalyzeCoinTable(perCoin, activeCoinId = null, { loading = f
             <tr class="${isActive ? "local-analyze-row-active" : ""}${pending ? " local-analyze-row-pending" : ""}">
               <td><strong>${row.coinName}</strong><div class="card-symbol">${row.coinId}</div></td>
               <td>${pending ? "…" : c?.signalsDetected || 0}</td>
-              <td>${pending ? "…" : c?.guidelinesPassed || 0}</td>
               <td>${pending ? "…" : c?.simulated || 0}</td>
               <td>${pending ? "…" : `${c?.wins || 0} / ${c?.losses || 0} / ${c?.openAfter3 || 0}`}</td>
               <td>${pending ? "…" : c?.winRate != null ? `${c.winRate}%` : "—"}</td>
