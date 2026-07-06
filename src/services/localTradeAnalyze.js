@@ -22,6 +22,45 @@ function sortSetsChronological(sets) {
   return [...sets].sort((a, b) => new Date(a.at) - new Date(b.at));
 }
 
+/** Local calendar day (matches user's Today in the UI). */
+function todayLocalDayKey(date = new Date()) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+function entryLocalDayKey(iso) {
+  return todayLocalDayKey(new Date(iso));
+}
+
+function startOfLocalDayMs(date = new Date()) {
+  const d = new Date(date);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+/** Calendar-day range: Today = local midnight → now; N days = last N local calendar days. */
+function sinceMsForDays(days) {
+  if (days <= 1) return startOfLocalDayMs();
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() - (days - 1));
+  return d.getTime();
+}
+
+function tradeTotalsSnapshot(counts) {
+  return {
+    simulated: counts.simulated || 0,
+    wins: counts.wins || 0,
+    losses: counts.losses || 0,
+    openAfter3: counts.openAfter3 || 0,
+    totalPnl: counts.totalPnl || 0,
+    winRate: counts.winRate ?? null,
+  };
+}
+
+
 async function loadSetMeta(setId) {
   try {
     const raw = await fs.readFile(path.join(HISTORY_DIR, setId, "meta.json"), "utf8");
@@ -260,6 +299,36 @@ function simulateTradeOutcome({
   };
 }
 
+function summarizeTodayPnl(simulations) {
+  const today = todayLocalDayKey();
+  const todaySims = simulations.filter(
+    (s) => s.entrySet?.at && entryLocalDayKey(s.entrySet.at) === today
+  );
+
+  let wins = 0;
+  let losses = 0;
+  let openAfter3 = 0;
+  let totalPnl = 0;
+
+  for (const sim of todaySims) {
+    const outcome = sim.simulation?.outcome;
+    totalPnl += sim.simulation?.pnlUsdt || 0;
+    if (outcome === "win_tp") wins++;
+    else if (outcome === "loss_sl") losses++;
+    else if (outcome === "after_3") openAfter3++;
+  }
+
+  return {
+    simulated: todaySims.length,
+    wins,
+    losses,
+    openAfter3,
+    totalPnl: round2(totalPnl),
+    winRate:
+      wins + losses > 0 ? round2((wins / (wins + losses)) * 100) : null,
+  };
+}
+
 async function analyzeCoinAcrossHistory(coin, sets, settings, options = {}) {
   const { onProgress } = options;
   const simulations = [];
@@ -405,15 +474,17 @@ async function runLocalTradeAnalysis(options = {}) {
   const settings = await getSettings();
   const coins = await getCoins();
   const days = Math.min(90, Math.max(1, Number(options.days) || 30));
-  const maxSets = Math.min(300, Math.max(10, Number(options.maxSets) || 80));
   const coinId = options.coinId || null;
-  const since = Date.now() - days * 24 * 60 * 60 * 1000;
+  const allSetsList = await listSets();
+  const sinceMs = sinceMsForDays(days);
+  const todaySinceMs = startOfLocalDayMs();
 
-  let sets = sortSetsChronological(await listSets());
-  sets = sets.filter((s) => new Date(s.at).getTime() >= since);
-  if (sets.length > maxSets) {
-    sets = sets.slice(-maxSets);
-  }
+  const sets = sortSetsChronological(
+    allSetsList.filter((s) => new Date(s.at).getTime() >= sinceMs)
+  );
+  const todaySets = sortSetsChronological(
+    allSetsList.filter((s) => new Date(s.at).getTime() >= todaySinceMs)
+  );
 
   const targetCoins = coinId
     ? coins.filter((c) => c.id === coinId)
@@ -454,10 +525,17 @@ async function runLocalTradeAnalysis(options = {}) {
     .flatMap((c) => c.simulations)
     .sort((a, b) => new Date(b.entrySet.at) - new Date(a.entrySet.at));
 
+  let todayTotals;
+  if (days <= 1) {
+    todayTotals = tradeTotalsSnapshot(totals);
+  } else {
+    todayTotals = summarizeTodayPnl(allSimulations);
+  }
+
   return {
     days,
-    maxSets,
     setsUsed: sets.length,
+    todaySetsUsed: todaySets.length,
     forwardCaptures: FORWARD_CAPTURES,
     holdCaptures: HOLD_CAPTURES,
     settings: {
@@ -469,6 +547,7 @@ async function runLocalTradeAnalysis(options = {}) {
       chartInterval: settings.chartInterval,
     },
     totals,
+    todayTotals,
     perCoin,
     simulations: allSimulations,
     generatedAt: new Date().toISOString(),

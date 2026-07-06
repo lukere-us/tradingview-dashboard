@@ -66,7 +66,6 @@ let cachedPnLReport = null;
 let selectedTradeId = null;
 
 const localAnalyzeDays = document.getElementById("localAnalyzeDays");
-const localAnalyzeMaxSets = document.getElementById("localAnalyzeMaxSets");
 const runLocalAnalyzeBtn = document.getElementById("runLocalAnalyzeBtn");
 const localAnalyzeStatus = document.getElementById("localAnalyzeStatus");
 const localAnalyzeSummary = document.getElementById("localAnalyzeSummary");
@@ -76,6 +75,7 @@ const localAnalyzeList = document.getElementById("localAnalyzeList");
 const localAnalyzeDetail = document.getElementById("localAnalyzeDetail");
 
 let cachedLocalAnalysis = null;
+let cachedLocalAnalyzeKey = null;
 let selectedLocalSimId = null;
 let selectedLocalAnalyzeCoinId = null;
 
@@ -455,12 +455,12 @@ function showView(name) {
   if (name === "coins") loadCoinsTable();
   if (name === "settings") loadSettingsForm();
   if (name === "compare") renderCompareView();
-  if (name === "signals") loadSignalChart();
-  if (name === "trades") loadTradeJournal();
-  if (name === "local-analyze" && !cachedLocalAnalysis) {
-    localAnalyzeStatus.textContent =
-      "Click Run Analysis to simulate paper trades from screenshot history.";
+  if (name === "signals") {
+    if (signalDaysSelect) signalDaysSelect.value = "1";
+    loadSignalChart();
   }
+  if (name === "trades") loadTradeJournal();
+  if (name === "local-analyze") loadLocalAnalyze({ forceToday: true });
 }
 
 function renderGroupFilters() {
@@ -616,7 +616,7 @@ function formatDayLabel(day) {
 }
 
 async function loadSignalChart() {
-  const days = Number(signalDaysSelect?.value) || 7;
+  const days = Number(signalDaysSelect?.value) || 1;
   signalChartSummary.innerHTML = `<p>Loading signal stats…</p>`;
   signalChartBars.innerHTML = "";
   signalChartTable.innerHTML = "";
@@ -1279,6 +1279,7 @@ function renderLocalAnalyzeSummary(data) {
   if (!localAnalyzeSummary || !data) return;
 
   const t = data.totals || {};
+  const today = data.todayTotals || {};
   const s = data.settings || {};
 
   localAnalyzeSummary.innerHTML = `
@@ -1287,6 +1288,11 @@ function renderLocalAnalyzeSummary(data) {
         <span class="pnl-card-label">Total simulated P&amp;L</span>
         <strong>${formatUsd(t.totalPnl)}</strong>
         <span class="pnl-card-sub">${t.simulated || 0} paper trades</span>
+      </div>
+      <div class="pnl-card ${pnlClass(today.totalPnl)}">
+        <span class="pnl-card-label">Today simulated P&amp;L</span>
+        <strong>${formatUsd(today.totalPnl)}</strong>
+        <span class="pnl-card-sub">${today.simulated || 0} paper trades · ${today.wins || 0}W / ${today.losses || 0}L / ${today.openAfter3 || 0} open</span>
       </div>
       <div class="pnl-card">
         <span class="pnl-card-label">Win rate</span>
@@ -1301,7 +1307,7 @@ function renderLocalAnalyzeSummary(data) {
       <div class="pnl-card">
         <span class="pnl-card-label">SS sets used</span>
         <strong>${data.setsUsed || 0}</strong>
-        <span class="pnl-card-sub">last ${data.maxSets || 80} max · ${data.forwardCaptures || 3} forward</span>
+        <span class="pnl-card-sub">${data.setsUsed || 0} screenshot sets · ${data.forwardCaptures || 3} forward</span>
       </div>
     </div>
     <p class="field-hint">
@@ -1315,16 +1321,46 @@ function renderLocalAnalyzeSummary(data) {
   `;
 }
 
-function renderLocalAnalyzeCoinTable(perCoin, activeCoinId = null) {
+function localAnalyzeTableRows(perCoin) {
+  if (perCoin?.length) return perCoin;
+  return cachedCoins.map((c) => ({
+    coinId: c.id,
+    coinName: c.name,
+    counts: null,
+  }));
+}
+
+function renderLocalAnalyzeCoinTable(perCoin, activeCoinId = null, { loading = false } = {}) {
   if (!localAnalyzeCoinTable) return;
 
-  if (!perCoin?.length) {
-    localAnalyzeCoinTable.innerHTML = "";
+  const rows = localAnalyzeTableRows(perCoin);
+  const tableClass = loading ? "local-analyze-table-loading" : "";
+
+  if (!rows.length) {
+    localAnalyzeCoinTable.innerHTML = `
+      <table class="${tableClass}">
+        <thead>
+          <tr>
+            <th>Coin</th>
+            <th>Signals</th>
+            <th>Passed</th>
+            <th>Trades</th>
+            <th>W / L / Open</th>
+            <th>Win %</th>
+            <th>Sim P&amp;L</th>
+            <th>Report</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td colspan="8" class="empty-state">${loading ? "Loading today's analysis…" : "No coins configured."}</td></tr>
+        </tbody>
+      </table>
+    `;
     return;
   }
 
   localAnalyzeCoinTable.innerHTML = `
-    <table>
+    <table class="${tableClass}">
       <thead>
         <tr>
           <th>Coin</th>
@@ -1338,20 +1374,21 @@ function renderLocalAnalyzeCoinTable(perCoin, activeCoinId = null) {
         </tr>
       </thead>
       <tbody>
-        ${perCoin
+        ${rows
           .map((row) => {
-            const c = row.counts || {};
+            const c = row.counts;
+            const pending = loading && !c;
             const isActive = activeCoinId === row.coinId;
-            const hasTrades = (c.simulated || 0) > 0;
+            const hasTrades = !pending && (c?.simulated || 0) > 0;
             return `
-            <tr class="${isActive ? "local-analyze-row-active" : ""}">
+            <tr class="${isActive ? "local-analyze-row-active" : ""}${pending ? " local-analyze-row-pending" : ""}">
               <td><strong>${row.coinName}</strong><div class="card-symbol">${row.coinId}</div></td>
-              <td>${c.signalsDetected || 0}</td>
-              <td>${c.guidelinesPassed || 0}</td>
-              <td>${c.simulated || 0}</td>
-              <td>${c.wins || 0} / ${c.losses || 0} / ${c.openAfter3 || 0}</td>
-              <td>${c.winRate != null ? `${c.winRate}%` : "—"}</td>
-              <td class="${pnlClass(c.totalPnl)}">${formatUsd(c.totalPnl)}</td>
+              <td>${pending ? "…" : c.signalsDetected || 0}</td>
+              <td>${pending ? "…" : c.guidelinesPassed || 0}</td>
+              <td>${pending ? "…" : c.simulated || 0}</td>
+              <td>${pending ? "…" : `${c.wins || 0} / ${c.losses || 0} / ${c.openAfter3 || 0}`}</td>
+              <td>${pending ? "…" : c.winRate != null ? `${c.winRate}%` : "—"}</td>
+              <td class="${pending ? "" : pnlClass(c.totalPnl)}">${pending ? "…" : formatUsd(c.totalPnl)}</td>
               <td>
                 <button
                   type="button"
@@ -1559,52 +1596,86 @@ function renderLocalAnalyzeList(simulations) {
 async function runLocalAnalyze() {
   if (!localAnalyzeSummary) return;
 
-  const days = Number(localAnalyzeDays?.value) || 7;
-  const maxSets = Number(localAnalyzeMaxSets?.value) || 80;
+  const days = Number(localAnalyzeDays?.value) || 1;
+  cachedLocalAnalyzeKey = String(days);
 
-  localAnalyzeStatus.textContent = "Analyzing screenshots… this may take a minute.";
-  localAnalyzeSummary.innerHTML = "";
-  localAnalyzeCoinTable.innerHTML = "";
-  localAnalyzeListHeader?.classList.add("hidden");
-  localAnalyzeListHeader.innerHTML = "";
-  localAnalyzeList.innerHTML = "";
-  localAnalyzeDetail.classList.add("hidden");
-  localAnalyzeList.classList.remove("hidden");
-  selectedLocalAnalyzeCoinId = null;
-  selectedLocalSimId = null;
+  const rangeLabel = days === 1 ? "today" : `last ${days} days`;
+  localAnalyzeStatus.textContent = `Analyzing ${rangeLabel}'s screenshots… this may take a minute.`;
+  renderLocalAnalyzeCoinTable(cachedLocalAnalysis?.perCoin, selectedLocalAnalyzeCoinId, {
+    loading: true,
+  });
   runLocalAnalyzeBtn.disabled = true;
 
   try {
-    const res = await fetch(
-      `/api/local-trade-analysis?days=${days}&maxSets=${maxSets}`
-    );
+    const res = await fetch(`/api/local-trade-analysis?days=${days}`);
     const data = await parseJsonResponse(res);
     if (!res.ok) throw new Error(data.error);
 
     cachedLocalAnalysis = data.analysis;
-    localAnalyzeStatus.textContent = `Done · ${cachedLocalAnalysis.simulations?.length || 0} simulated trades from ${cachedLocalAnalysis.setsUsed} screenshot sets.`;
-    renderLocalAnalyzeSummary(cachedLocalAnalysis);
-    renderLocalAnalyzeCoinTable(cachedLocalAnalysis.perCoin, selectedLocalAnalyzeCoinId);
-    if (selectedLocalAnalyzeCoinId) {
-      viewLocalAnalyzeCoinReport(selectedLocalAnalyzeCoinId);
-    } else {
-      renderLocalAnalyzeListHeader(null);
-      localAnalyzeList.innerHTML = `<p class="field-hint local-analyze-prompt">Click <strong>View Report</strong> on a coin in the table above to see its paper trades below.</p>`;
-    }
-
-    if (selectedLocalSimId) {
-      const sim = cachedLocalAnalysis.simulations?.find((s) => s.id === selectedLocalSimId);
-      if (sim) {
-        localAnalyzeList.classList.add("hidden");
-        localAnalyzeDetail.classList.remove("hidden");
-        renderLocalAnalyzeDetail(sim);
-      }
-    }
+    selectedLocalAnalyzeCoinId = null;
+    selectedLocalSimId = null;
+    localAnalyzeListHeader?.classList.add("hidden");
+    localAnalyzeListHeader.innerHTML = "";
+    localAnalyzeDetail.classList.add("hidden");
+    localAnalyzeList.classList.remove("hidden");
+    renderLocalAnalyzeFromCache();
   } catch (err) {
     localAnalyzeStatus.innerHTML = `<span class="text-error">${err.message || "Analysis failed."}</span>`;
   } finally {
     runLocalAnalyzeBtn.disabled = false;
   }
+}
+
+function renderLocalAnalyzeFromCache() {
+  if (!cachedLocalAnalysis) return;
+
+  localAnalyzeStatus.textContent = `Done · ${cachedLocalAnalysis.simulations?.length || 0} simulated trades from ${cachedLocalAnalysis.setsUsed} screenshot sets.`;
+  renderLocalAnalyzeSummary(cachedLocalAnalysis);
+  renderLocalAnalyzeCoinTable(cachedLocalAnalysis.perCoin, selectedLocalAnalyzeCoinId);
+  if (selectedLocalAnalyzeCoinId) {
+    viewLocalAnalyzeCoinReport(selectedLocalAnalyzeCoinId);
+  } else {
+    renderLocalAnalyzeListHeader(null);
+    localAnalyzeList.innerHTML = `<p class="field-hint local-analyze-prompt">Click <strong>View Report</strong> on a coin in the table above to see its paper trades below.</p>`;
+  }
+
+  if (selectedLocalSimId) {
+    const sim = cachedLocalAnalysis.simulations?.find((s) => s.id === selectedLocalSimId);
+    if (sim) {
+      localAnalyzeList.classList.add("hidden");
+      localAnalyzeDetail.classList.remove("hidden");
+      renderLocalAnalyzeDetail(sim);
+    }
+  }
+}
+
+function localAnalyzeParamsKey() {
+  return String(Number(localAnalyzeDays?.value) || 1);
+}
+
+async function loadLocalAnalyze(options = {}) {
+  const forceToday = options.forceToday === true;
+  const force = options.force === true || forceToday;
+
+  if (forceToday && localAnalyzeDays) {
+    localAnalyzeDays.value = "1";
+  }
+
+  const key = localAnalyzeParamsKey();
+
+  if (!force && cachedLocalAnalysis && cachedLocalAnalyzeKey === key) {
+    renderLocalAnalyzeFromCache();
+    return;
+  }
+
+  renderLocalAnalyzeCoinTable(cachedLocalAnalysis?.perCoin, selectedLocalAnalyzeCoinId, {
+    loading: true,
+  });
+  localAnalyzeStatus.textContent = forceToday
+    ? "Loading today's paper trade table…"
+    : "Loading paper trade table…";
+
+  await runLocalAnalyze();
 }
 
 function renderCompareView() {
@@ -2202,6 +2273,7 @@ pnlDaysSelect?.addEventListener("change", loadTradeJournal);
 tradeJournalFilter?.addEventListener("change", () => renderTradeJournalList(cachedTradeJournal));
 refreshTradeJournalBtn?.addEventListener("click", loadTradeJournal);
 runLocalAnalyzeBtn?.addEventListener("click", runLocalAnalyze);
+localAnalyzeDays?.addEventListener("change", loadLocalAnalyze);
 signalDaysSelect?.addEventListener("change", loadSignalChart);
 
 refreshBtn.addEventListener("click", async () => {

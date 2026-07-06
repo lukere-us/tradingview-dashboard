@@ -1,6 +1,6 @@
 const fs = require("fs/promises");
 const path = require("path");
-const { resolveLastActed } = require("./signalMemory");
+const { holdDurationMs } = require("./signalMemory");
 const { listSets, HISTORY_DIR } = require("./historyStore");
 
 const DATA_DIR = path.join(__dirname, "..", "..", "data");
@@ -44,16 +44,22 @@ async function saveHistory(events) {
 
 /**
  * Record buy/sell only when it is new.
- * Same direction is ignored only while still inside the 2-candle hold window.
- * After 2 candles, the same label can count again.
+ * Dedup uses explicit lastActed fields only — not the live chart signal on the card.
  */
 async function recordSignalEvent(coinId, result, previous, chartInterval = "15") {
   const signal = result?.signal;
   if (signal !== "buy" && signal !== "sell") return null;
 
-  const { lastActed, holdActive } = resolveLastActed(previous, chartInterval);
-  if (holdActive && lastActed === signal) {
-    return null;
+  const lastActed = previous?.lastActedSignal || null;
+  const lastActedAt = previous?.lastActedAt || null;
+  if (lastActed && lastActedAt && lastActed === signal) {
+    const actedAt = new Date(lastActedAt).getTime();
+    if (
+      Number.isFinite(actedAt) &&
+      Date.now() - actedAt < holdDurationMs(chartInterval)
+    ) {
+      return null;
+    }
   }
 
   const at = result.analyzedAt || new Date().toISOString();
@@ -159,14 +165,17 @@ async function getSignalStats({ days = 7, coinIds = null } = {}) {
     for (const [coinId, snap] of Object.entries(signals)) {
       const row = byCoin[coinId];
       if (!row) continue;
-      countSnapshot(row, day, snap);
-    }
+      if (!snap?.isNewSignal) continue;
 
-    for (const event of events) {
-      if (dayKey(event.at) !== day) continue;
-      const diff = Math.abs(new Date(event.at).getTime() - new Date(set.at).getTime());
-      if (diff > 120_000) continue;
-      countedEvents.add(eventKey(event));
+      countSnapshot(row, day, snap);
+
+      // Only suppress legacy events that were already counted from this capture.
+      for (const event of events) {
+        if (event.coinId !== coinId) continue;
+        if (dayKey(event.at) !== day) continue;
+        const diff = Math.abs(new Date(event.at).getTime() - new Date(set.at).getTime());
+        if (diff <= 120_000) countedEvents.add(eventKey(event));
+      }
     }
   }
 

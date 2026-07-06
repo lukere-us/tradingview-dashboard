@@ -16,11 +16,11 @@ const CANDLE_WIDTH_PX = 26;
 const CANDLES_ZONE_WIDTH = LAST_CANDLES * CANDLE_WIDTH_PX; // ~78px
 
 /** Future Trend Pro BUY/SELL text bars (not BreakOut/BreakDwn arrowheads). */
-const MIN_TEXT_LABEL_W = 45;
-const MAX_LABEL_W = 110;
+const MIN_TEXT_LABEL_W = 40;
+const MAX_LABEL_W = 150;
 const MIN_TEXT_LABEL_H = 10;
-const MAX_LABEL_H = 48;
-const MIN_TEXT_ASPECT = 2;
+const MAX_LABEL_H = 56;
+const MIN_TEXT_ASPECT = 1.35;
 const MIN_TEXT_ROWS = 2;
 
 const CURRENT_DIR = path.join(__dirname, "..", "..", "screenshots", "current");
@@ -46,6 +46,24 @@ function isBuyGreen(r, g, b) {
 /** Future Trend Pro SELL label red (e.g. rgb(231,22,63) / rgb(255,23,68)). */
 function isSellRed(r, g, b) {
   return r >= 200 && g <= 55 && b >= 45 && b <= 95 && r > g + 120 && r > b + 80;
+}
+
+/** Dark maroon fill inside SELL tooltips when the border renders brighter than the body. */
+function isSellLabelBody(r, g, b) {
+  return (
+    r >= 28 &&
+    r <= 70 &&
+    g >= 12 &&
+    g <= 45 &&
+    b >= 22 &&
+    b <= 55 &&
+    r > g &&
+    r + g + b >= 70
+  );
+}
+
+function isSellPixel(r, g, b) {
+  return isSellRed(r, g, b) || isSellLabelBody(r, g, b);
 }
 
 /** BreakOut arrow — yellow (small up triangle, not a BUY/SELL text bar). */
@@ -85,14 +103,29 @@ function getPixel(data, channels, x, y) {
 function labelColor(r, g, b) {
   if (isBreakOutYellow(r, g, b) || isBreakDwnOrange(r, g, b)) return null;
   if (isBuyGreen(r, g, b)) return "buy";
-  if (isSellRed(r, g, b)) return "sell";
+  if (isSellPixel(r, g, b)) return "sell";
   return null;
 }
 
 function colorMatchesType(r, g, b, type) {
   if (type === "buy") return isBuyGreen(r, g, b);
-  if (type === "sell") return isSellRed(r, g, b);
+  if (type === "sell") return isSellPixel(r, g, b);
   return false;
+}
+
+function hasSellBorderAccent(data, channels, box) {
+  let count = 0;
+  const pad = 2;
+
+  for (let y = box.y - pad; y < box.y + box.height + pad; y++) {
+    for (let x = box.x - pad; x < box.x + box.width + pad; x++) {
+      if (x < 0 || y < 0 || x >= W || y >= PLOT.bottom) continue;
+      const [r, g, b] = getPixel(data, channels, x, y);
+      if (isSellRed(r, g, b)) count++;
+    }
+  }
+
+  return count >= 8;
 }
 
 /** BreakOut/BreakDwn render as small arrowheads — growing span, not flat text rows. */
@@ -172,19 +205,52 @@ function isTextSignalLabel(data, channels, box) {
   return textRows >= MIN_TEXT_ROWS;
 }
 
+/** Bbox built from pixel sweep — already validated by size; skip sparse row scan. */
+function isProbableSignalLabel(data, channels, box) {
+  if (isTextSignalLabel(data, channels, box)) return true;
+
+  if (
+    box.width < MIN_TEXT_LABEL_W ||
+    box.width > MAX_LABEL_W ||
+    box.height < MIN_TEXT_LABEL_H ||
+    box.height > MAX_LABEL_H ||
+    box.width / box.height < MIN_TEXT_ASPECT
+  ) {
+    if (
+      box.type === "sell" &&
+      box.width >= MIN_TEXT_LABEL_W &&
+      box.width <= MAX_LABEL_W &&
+      box.height >= MIN_TEXT_LABEL_H &&
+      box.height <= MAX_LABEL_H &&
+      hasSellBorderAccent(data, channels, box)
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  // Wide labels with price text (e.g. "SELL 584.07") can look like arrows row-by-row.
+  if (box.width >= 55 && box.width / box.height >= 1.2) {
+    return true;
+  }
+
+  if (box.type === "sell" && hasSellBorderAccent(data, channels, box)) {
+    return true;
+  }
+
+  return !isArrowMarker(data, channels, box);
+}
+
 /** True if the label sits on the last 3 candles (not older mid-chart signals). */
 function boxOnLastCandles(box, zone) {
-  const centerX = box.x + box.width / 2;
   const overlapLeft = Math.max(box.x, zone.left);
   const overlapRight = Math.min(box.x + box.width, zone.right);
   const overlap = Math.max(0, overlapRight - overlapLeft);
-  const overlapRatio = box.width > 0 ? overlap / box.width : 0;
 
-  // Center must sit on a last-3 candle (not an indicator line bleeding in from the left).
-  const centerOnCandles =
-    centerX >= zone.left - 10 && centerX <= zone.right + 6;
+  const startsNearLastCandles = box.x >= zone.left - 24;
+  const overlapsStrip = overlap >= 10;
 
-  return centerOnCandles && overlapRatio >= 0.35;
+  return startsNearLastCandles && overlapsStrip;
 }
 
 function mergeBoxes(boxes) {
@@ -194,23 +260,149 @@ function mergeBoxes(boxes) {
     const hit = merged.find(
       (m) =>
         m.type === box.type &&
-        Math.abs(m.x - box.x) < 55 &&
-        box.y <= m.y + m.height + 6 &&
-        box.y >= m.y - 6
+        Math.abs(m.x - box.x) < 80 &&
+        boxesOverlapX(m, box, 0.35) &&
+        box.y <= m.y + m.height + 28 &&
+        box.y >= m.y - 28
     );
 
     if (hit) {
       const right = Math.max(hit.x + hit.width, box.x + box.width);
-      hit.y = Math.min(hit.y, box.y);
-      hit.height = Math.max(hit.y + hit.height, box.y + box.height) - hit.y;
+      const newY = Math.min(hit.y, box.y);
+      const newH = Math.max(hit.y + hit.height, box.y + box.height) - newY;
+
+      // Text labels and arrow markers stack vertically — don't fuse into one oversized box.
+      if (newH > MAX_LABEL_H) {
+        merged.push({ ...box });
+        continue;
+      }
+
+      const newW = right - Math.min(hit.x, box.x);
+      if (newW > MAX_LABEL_W) {
+        merged.push({ ...box });
+        continue;
+      }
+
+      hit.y = newY;
+      hit.height = newH;
       hit.x = Math.min(hit.x, box.x);
-      hit.width = right - hit.x;
+      hit.width = newW;
     } else {
       merged.push({ ...box });
     }
   }
 
   return merged;
+}
+
+function boxesOverlapX(a, b, minRatio = 0.3) {
+  const overlapLeft = Math.max(a.x, b.x);
+  const overlapRight = Math.min(a.x + a.width, b.x + b.width);
+  const overlap = Math.max(0, overlapRight - overlapLeft);
+  const minWidth = Math.min(a.width, b.width);
+  return minWidth > 0 && overlap / minWidth >= minRatio;
+}
+
+/** Merge fragmented letter runs on the same row (anti-aliased "SELL 584.07" text). */
+function mergeHorizontalRowRuns(boxes) {
+  const byKey = new Map();
+
+  for (const box of boxes) {
+    const key = `${box.type}:${box.y}`;
+    if (!byKey.has(key)) byKey.set(key, []);
+    byKey.get(key).push(box);
+  }
+
+  const merged = [];
+  for (const group of byKey.values()) {
+    const sorted = [...group].sort((a, b) => a.x - b.x);
+    let current = null;
+
+    for (const box of sorted) {
+      if (!current) {
+        current = { ...box };
+        continue;
+      }
+
+      const gap = box.x - (current.x + current.width);
+      if (gap <= 16) {
+        const right = Math.max(current.x + current.width, box.x + box.width);
+        current.x = Math.min(current.x, box.x);
+        current.width = right - current.x;
+      } else {
+        merged.push(current);
+        current = { ...box };
+      }
+    }
+
+    if (current) merged.push(current);
+  }
+
+  return merged;
+}
+
+/** Build bounding boxes from same-color pixels (handles gapped "SELL 584.07" text). */
+function collectTypeBoundingBoxes(data, channels, scanLeft, scanRight) {
+  const pixelsByType = { buy: [], sell: [] };
+
+  for (let y = PLOT.top; y < PLOT.bottom; y++) {
+    for (let x = scanLeft; x < scanRight; x++) {
+      if (inStatusTable(x, y)) continue;
+      const [r, g, b] = getPixel(data, channels, x, y);
+      const type = labelColor(r, g, b);
+      if (type) pixelsByType[type].push({ x, y });
+    }
+  }
+
+  const boxes = [];
+
+  for (const type of ["buy", "sell"]) {
+    const pixels = pixelsByType[type];
+    if (!pixels.length) continue;
+
+    pixels.sort((a, b) => a.y - b.y || a.x - b.x);
+    const groups = [];
+    let group = [pixels[0]];
+    let groupMinY = pixels[0].y;
+
+    for (let i = 1; i < pixels.length; i++) {
+      const p = pixels[i];
+      if (p.y - groupMinY <= 52) {
+        group.push(p);
+      } else {
+        groups.push(group);
+        group = [p];
+        groupMinY = p.y;
+      }
+    }
+    groups.push(group);
+
+    for (const g of groups) {
+      let minX = Infinity;
+      let maxX = -Infinity;
+      let minY = Infinity;
+      let maxY = -Infinity;
+
+      for (const p of g) {
+        minX = Math.min(minX, p.x);
+        maxX = Math.max(maxX, p.x);
+        minY = Math.min(minY, p.y);
+        maxY = Math.max(maxY, p.y);
+      }
+
+      if (g.length >= 20) {
+        boxes.push({
+          type,
+          x: minX,
+          y: minY,
+          width: maxX - minX + 1,
+          height: maxY - minY + 1,
+        });
+      }
+    }
+  }
+
+  return boxes;
 }
 
 async function analyzeChartSignal(imagePath) {
@@ -226,8 +418,9 @@ async function analyzeChartSignal(imagePath) {
     .toBuffer({ resolveWithObject: true });
   const channels = info.channels;
   const zone = lastCandlesZone();
-  // Labels on the last 3 candles extend at most ~half their width left of the zone.
   const scanLeft = Math.max(PLOT.left, zone.left - Math.ceil(MAX_LABEL_W / 2));
+  // Labels on the last candle often extend past the candle strip (e.g. "SELL 584.07").
+  const scanRight = Math.min(W - 1, PLOT.right + Math.ceil(MAX_LABEL_W / 2));
   const candleYs = [];
 
   // Candle bodies only inside the last-3-candles strip (for top/bottom).
@@ -246,7 +439,7 @@ async function analyzeChartSignal(imagePath) {
     let runType = null;
 
     // Scan last 3 candles + pad so full "BUY/SELL + price" labels are captured.
-    for (let x = scanLeft; x < zone.right; x++) {
+    for (let x = scanLeft; x < scanRight; x++) {
       if (inStatusTable(x, y)) continue;
 
       const [r, g, b] = getPixel(data, channels, x, y);
@@ -266,10 +459,13 @@ async function analyzeChartSignal(imagePath) {
     }
   }
 
-  const labels = mergeBoxes(rowBoxes).filter(
+  const labels = mergeBoxes([
+    ...mergeHorizontalRowRuns(rowBoxes),
+    ...collectTypeBoundingBoxes(data, channels, scanLeft, scanRight),
+  ]).filter(
     (b) =>
       !boxInStatusTable(b) &&
-      isTextSignalLabel(data, channels, b) &&
+      isProbableSignalLabel(data, channels, b) &&
       boxOnLastCandles(b, zone)
   );
 
@@ -277,10 +473,8 @@ async function analyzeChartSignal(imagePath) {
     return { signal: "none", position: null, highlight: null };
   }
 
-  // Prefer the rightmost label (newest of the last 3 candles).
-  const latest = labels.reduce((best, box) =>
-    box.x + box.width > best.x + best.width ? box : best
-  );
+  // Prefer the rightmost anchor on the timeline (newest of the last 3 candles).
+  const latest = labels.reduce((best, box) => (box.x > best.x ? box : best));
 
   // Future Trend Pro draws BUY under candles and SELL above them.
   // Prefer geometry when candles are clear; fall back to indicator convention.

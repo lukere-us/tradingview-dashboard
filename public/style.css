@@ -1588,6 +1588,33 @@ body {
   margin-bottom: 1.25rem;
 }
 
+#view-local-analyze.view.active {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  width: 100%;
+}
+
+.local-analyze-coin-table {
+  width: 100%;
+  order: 2;
+  margin-bottom: 1.25rem;
+}
+
+#view-local-analyze .local-analyze-summary {
+  order: 1;
+}
+
+#view-local-analyze #localAnalyzeStatus {
+  order: 0;
+}
+
+#view-local-analyze .local-analyze-list-header,
+#view-local-analyze .local-analyze-list,
+#view-local-analyze .local-analyze-detail {
+  order: 3;
+}
+
 .local-summary-cards {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -1638,6 +1665,14 @@ body {
 
 .coins-table .local-analyze-view-btn {
   white-space: nowrap;
+}
+
+.local-analyze-table-loading tbody td {
+  color: #9aa0a6;
+}
+
+.local-analyze-row-pending td {
+  color: #9aa0a6;
 }
 
 .local-analyze-card {
@@ -1692,6 +1727,10 @@ body {
   margin: 0.5rem 0 0;
   font-size: 0.85rem;
   color: #9aa0a6;
+}
+
+.coins-table {
+  width: 100%;
 }
 
 .coins-table table {

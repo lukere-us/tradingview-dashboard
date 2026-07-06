@@ -356,9 +356,8 @@ app.get("/api/pnl-report", async (req, res) => {
 app.get("/api/local-trade-analysis", async (req, res) => {
   try {
     const days = Math.min(90, Math.max(1, Number(req.query.days) || 30));
-    const maxSets = Math.min(300, Math.max(10, Number(req.query.maxSets) || 80));
     const coinId = req.query.coinId || null;
-    const result = await runLocalTradeAnalysis({ days, coinId, maxSets });
+    const result = await runLocalTradeAnalysis({ days, coinId });
     res.json({ analysis: result });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -367,7 +366,7 @@ app.get("/api/local-trade-analysis", async (req, res) => {
 
 app.get("/api/signal-stats", async (req, res) => {
   try {
-    const days = Math.min(30, Math.max(1, Number(req.query.days) || 7));
+    const days = Math.min(30, Math.max(1, Number(req.query.days) || 1));
     const coins = await getCoins();
     const stats = await getSignalStats({
       days,
