@@ -161,6 +161,30 @@ async function getPositionAmt(settings, symbol) {
   return Number(row?.positionAmt || 0);
 }
 
+async function fetchAccountSnapshot(settings) {
+  return signedRequest(settings, "GET", "/fapi/v2/account");
+}
+
+async function fetchOpenPositions(settings) {
+  const rows = await signedRequest(settings, "GET", "/fapi/v2/positionRisk");
+  return Array.isArray(rows) ? rows : [];
+}
+
+async function fetchIncomeHistory(settings, { startTime, endTime, limit = 1000 } = {}) {
+  const types = ["REALIZED_PNL", "COMMISSION"];
+  const all = [];
+
+  for (const incomeType of types) {
+    const params = { incomeType, limit };
+    if (startTime) params.startTime = startTime;
+    if (endTime) params.endTime = endTime;
+    const rows = await signedRequest(settings, "GET", "/fapi/v1/income", params);
+    if (Array.isArray(rows)) all.push(...rows);
+  }
+
+  return all.sort((a, b) => Number(b.time) - Number(a.time));
+}
+
 async function ensureLeverage(settings, symbol) {
   try {
     await signedRequest(settings, "POST", "/fapi/v1/leverage", {
@@ -204,7 +228,7 @@ async function appendTradeLog(entry) {
   return entry;
 }
 
-async function logTradeError({ coinId, coinName, symbol, signal, error }) {
+async function logTradeError({ coinId, coinName, symbol, signal, error, analysis }) {
   return appendTradeLog({
     id: `${Date.now()}-${coinId}-err`,
     at: new Date().toISOString(),
@@ -214,6 +238,30 @@ async function logTradeError({ coinId, coinName, symbol, signal, error }) {
     signal,
     status: "error",
     error: String(error || "Unknown error"),
+    analysis: analysis || null,
+  });
+}
+
+async function logTradeSkipped({
+  coinId,
+  coinName,
+  symbol,
+  signal,
+  reason,
+  guidelines,
+  analysis,
+}) {
+  return appendTradeLog({
+    id: `${Date.now()}-${coinId}-skip`,
+    at: new Date().toISOString(),
+    coinId,
+    coinName: coinName || coinId,
+    symbol: symbol || "",
+    signal,
+    status: "skipped",
+    reason: String(reason || "Skipped"),
+    guidelines: guidelines || null,
+    analysis: analysis || null,
   });
 }
 
@@ -319,7 +367,7 @@ async function quantityFromUsdt(settings, symbol, usdt) {
  *  - long_only: BUY opens/adds long, SELL closes long
  *  - reversal: BUY goes long (closes short first), SELL goes short (closes long first)
  */
-async function executeSignalTrade({ coin, signal, settings }) {
+async function executeSignalTrade({ coin, signal, settings, analysis }) {
   if (!settings.autoTradeEnabled) {
     return { skipped: true, reason: "Auto-trade disabled" };
   }
@@ -427,6 +475,7 @@ async function executeSignalTrade({ coin, signal, settings }) {
     tpPercent: settings.tradeTpPercent,
     slPercent: settings.tradeSlPercent,
     testnet: Boolean(settings.binanceTestnet),
+    analysis: analysis || null,
     actions: actions.map((a) => ({
       action: a.action,
       quantity: a.quantity,
@@ -460,10 +509,20 @@ async function listTrades(limit = 50) {
   return log.slice(0, limit);
 }
 
+async function getTradeById(id) {
+  const log = await loadTradeLog();
+  return log.find((t) => t.id === id) || null;
+}
+
 module.exports = {
   executeSignalTrade,
   testBinanceConnection,
   listTrades,
+  getTradeById,
   logTradeError,
+  logTradeSkipped,
   futuresSymbol,
+  fetchAccountSnapshot,
+  fetchIncomeHistory,
+  fetchOpenPositions,
 };

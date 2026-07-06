@@ -12,6 +12,8 @@ const DEFAULT_SETTINGS = {
   chartInterval: "15",
   alertThresholdPercent: 3,
   historyPerPage: 10,
+  screenshotWaitSeconds: 5,
+  chartLoadMaxRetries: 6,
   autoTradeEnabled: false,
   binanceApiKey: "",
   binanceApiSecret: "",
@@ -22,6 +24,7 @@ const DEFAULT_SETTINGS = {
   tradeMode: "long_only",
   tradeTpPercent: 30,
   tradeSlPercent: 30,
+  autoTradeRequireGuidelines: true,
 };
 
 const MIN_REFRESH_MINUTES = 1;
@@ -30,6 +33,10 @@ const MIN_COLUMNS = 1;
 const MAX_COLUMNS = 6;
 const MIN_HISTORY_PER_PAGE = 5;
 const MAX_HISTORY_PER_PAGE = 50;
+const MIN_SCREENSHOT_WAIT_SECONDS = 0;
+const MAX_SCREENSHOT_WAIT_SECONDS = 60;
+const MIN_CHART_LOAD_RETRIES = 1;
+const MAX_CHART_LOAD_RETRIES = 12;
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
@@ -95,6 +102,20 @@ function normalizeSettings(input = {}) {
       MIN_HISTORY_PER_PAGE,
       MAX_HISTORY_PER_PAGE
     ),
+    screenshotWaitSeconds: clamp(
+      Number.isFinite(Number(merged.screenshotWaitSeconds))
+        ? Number(merged.screenshotWaitSeconds)
+        : DEFAULT_SETTINGS.screenshotWaitSeconds,
+      MIN_SCREENSHOT_WAIT_SECONDS,
+      MAX_SCREENSHOT_WAIT_SECONDS
+    ),
+    chartLoadMaxRetries: clamp(
+      Number.isFinite(Number(merged.chartLoadMaxRetries))
+        ? Number(merged.chartLoadMaxRetries)
+        : DEFAULT_SETTINGS.chartLoadMaxRetries,
+      MIN_CHART_LOAD_RETRIES,
+      MAX_CHART_LOAD_RETRIES
+    ),
     autoTradeEnabled: Boolean(merged.autoTradeEnabled),
     binanceApiKey:
       typeof merged.binanceApiKey === "string" ? merged.binanceApiKey.trim() : "",
@@ -126,6 +147,10 @@ function normalizeSettings(input = {}) {
       0.5,
       90
     ),
+    autoTradeRequireGuidelines:
+      typeof merged.autoTradeRequireGuidelines === "boolean"
+        ? merged.autoTradeRequireGuidelines
+        : DEFAULT_SETTINGS.autoTradeRequireGuidelines,
   };
 }
 
@@ -170,6 +195,8 @@ function publicSettings(settings) {
     chartInterval: settings.chartInterval || "15",
     alertThresholdPercent: settings.alertThresholdPercent ?? 3,
     historyPerPage: settings.historyPerPage ?? 10,
+    screenshotWaitSeconds: settings.screenshotWaitSeconds ?? 5,
+    chartLoadMaxRetries: settings.chartLoadMaxRetries ?? 6,
     autoTradeEnabled: Boolean(settings.autoTradeEnabled),
     binanceApiKeyConfigured: Boolean(settings.binanceApiKey),
     binanceApiSecretConfigured: Boolean(settings.binanceApiSecret),
@@ -181,6 +208,7 @@ function publicSettings(settings) {
     tradeMode: settings.tradeMode,
     tradeTpPercent: settings.tradeTpPercent,
     tradeSlPercent: settings.tradeSlPercent,
+    autoTradeRequireGuidelines: Boolean(settings.autoTradeRequireGuidelines),
   };
 }
 

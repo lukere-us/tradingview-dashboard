@@ -4,6 +4,7 @@ const puppeteer = require("puppeteer");
 const { getCoins } = require("./coinsStore");
 const { getSettings } = require("./settingsStore");
 const { CURRENT_DIR } = require("./historyStore");
+const { isScreenshotChartReady } = require("./tradeGuidelines");
 const {
   getBrowserLaunchOptions,
   assertProfileAvailable,
@@ -12,7 +13,6 @@ const {
 const CHART_WIDTH = 1280;
 const CHART_HEIGHT = 720;
 
-// Keep waits short — interval is already in the chart URL.
 const FIRST_SETTLE_MS = 1200;
 const SWITCH_SETTLE_MS = 700;
 const QUICK_SETTLE_MS = 600;
@@ -22,6 +22,19 @@ const GOTO_TIMEOUT_MS = 45000;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function screenshotWaitMs(settings) {
+  const waitSec = Number.isFinite(Number(settings.screenshotWaitSeconds))
+    ? Number(settings.screenshotWaitSeconds)
+    : 5;
+  return Math.max(0, waitSec) * 1000;
+}
+
+function maxRetryRounds(settings) {
+  const n = Number(settings.chartLoadMaxRetries);
+  if (Number.isFinite(n)) return Math.min(12, Math.max(1, n));
+  return 6;
 }
 
 async function buildChartUrl(symbol, settings) {
@@ -113,7 +126,7 @@ async function initializeChart(page, coin, settings) {
   await gotoChart(page, url);
   await dismissOverlays(page);
 
-  const apiReady = await waitForChartApi(page);
+  const apiReady = await waitForChartApi(page, API_PROBE_MS * 2);
   if (apiReady) {
     await applyChartInterval(page, settings.chartInterval || "15");
   }
@@ -166,7 +179,11 @@ async function switchChartSymbol(page, symbol) {
   await sleep(SWITCH_SETTLE_MS);
 }
 
-async function prepareChart(page, coin, settings, canFastSwitch, isFirst) {
+async function prepareChart(page, coin, settings, canFastSwitch, isFirst, { forceFull = false } = {}) {
+  if (forceFull) {
+    return initializeChart(page, coin, settings);
+  }
+
   if (isFirst) {
     return initializeChart(page, coin, settings);
   }
@@ -183,6 +200,26 @@ async function prepareChart(page, coin, settings, canFastSwitch, isFirst) {
 
   await quickNavigateSymbol(page, coin, settings);
   return hasChartApi(page);
+}
+
+async function takeScreenshot(page, coin, settings, filePath, { canFastSwitch, isFirst, forceFull = false }) {
+  const waitMs = screenshotWaitMs(settings);
+  const fastSwitch = await prepareChart(page, coin, settings, canFastSwitch, isFirst, {
+    forceFull,
+  });
+
+  if (waitMs > 0) {
+    await sleep(waitMs);
+  }
+
+  await page.screenshot({ path: filePath, fullPage: false });
+  const check = await isScreenshotChartReady(filePath);
+
+  return {
+    canFastSwitch: forceFull ? false : fastSwitch,
+    ready: check.ready,
+    reason: check.ready ? null : check.reason || "indicator-table-not-found",
+  };
 }
 
 async function captureAllCoins({ coinIds = null, onProgress } = {}) {
@@ -206,6 +243,7 @@ async function captureAllCoins({ coinIds = null, onProgress } = {}) {
   const results = [];
   let page;
   let canFastSwitch = false;
+  const pendingRetry = [];
 
   try {
     page = await browser.newPage();
@@ -217,9 +255,11 @@ async function captureAllCoins({ coinIds = null, onProgress } = {}) {
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     );
 
+    // Pass 1 — normal capture for every coin (no per-coin retry loop).
     for (let i = 0; i < coins.length; i++) {
       const coin = coins[i];
       const startedAt = Date.now();
+      const filePath = path.join(CURRENT_DIR, `${coin.id}.png`);
 
       onProgress?.({
         phase: "start",
@@ -230,26 +270,50 @@ async function captureAllCoins({ coinIds = null, onProgress } = {}) {
       });
 
       try {
-        canFastSwitch = await prepareChart(
-          page,
-          coin,
-          settings,
+        const capture = await takeScreenshot(page, coin, settings, filePath, {
           canFastSwitch,
-          i === 0
-        );
+          isFirst: i === 0,
+          forceFull: false,
+        });
 
-        const filePath = path.join(CURRENT_DIR, `${coin.id}.png`);
-        await page.screenshot({ path: filePath, fullPage: false });
-
+        canFastSwitch = capture.canFastSwitch;
         const durationMs = Date.now() - startedAt;
-        const result = { coin: coin.id, status: "ok", file: filePath, durationMs };
-        results.push(result);
+        const resultIndex = results.length;
+
+        if (capture.ready) {
+          results.push({
+            coin: coin.id,
+            status: "ok",
+            file: filePath,
+            durationMs,
+            loadAttempts: 1,
+          });
+        } else {
+          pendingRetry.push({
+            coin,
+            filePath,
+            resultIndex,
+            reason: capture.reason,
+          });
+          results.push({
+            coin: coin.id,
+            status: "ok",
+            file: filePath,
+            durationMs,
+            loadAttempts: 1,
+            chartPending: true,
+          });
+          console.log(
+            `Chart not fully loaded for ${coin.id} (${capture.reason}) — queued for retry`
+          );
+        }
+
         onProgress?.({
           phase: "done",
           current: i + 1,
           total: coins.length,
           coin: coin.id,
-          result,
+          result: results[resultIndex],
         });
       } catch (err) {
         canFastSwitch = false;
@@ -269,6 +333,114 @@ async function captureAllCoins({ coinIds = null, onProgress } = {}) {
           result,
         });
       }
+    }
+
+    // Pass 2+ — reload only coins whose chart / indicator table was not ready.
+    const retryRounds = maxRetryRounds(settings);
+    let round = 0;
+
+    while (pendingRetry.length > 0 && round < retryRounds) {
+      round += 1;
+      const stillPending = [];
+
+      console.log(
+        `Retry round ${round}/${retryRounds} for ${pendingRetry.length} coin(s): ${pendingRetry.map((p) => p.coin.id).join(", ")}`
+      );
+
+      for (let j = 0; j < pendingRetry.length; j++) {
+        const item = pendingRetry[j];
+        const { coin, filePath, resultIndex } = item;
+        const startedAt = Date.now();
+
+        onProgress?.({
+          phase: "retry",
+          current: j + 1,
+          total: pendingRetry.length,
+          coin: coin.id,
+          attempt: round,
+          maxRetries: retryRounds,
+          reason: item.reason,
+        });
+
+        try {
+          const capture = await takeScreenshot(page, coin, settings, filePath, {
+            canFastSwitch: false,
+            isFirst: false,
+            forceFull: true,
+          });
+
+          canFastSwitch = false;
+          const durationMs = Date.now() - startedAt;
+          const attempts = round + 1;
+
+          if (capture.ready) {
+            results[resultIndex] = {
+              coin: coin.id,
+              status: "ok",
+              file: filePath,
+              durationMs,
+              loadAttempts: attempts,
+            };
+            console.log(`Retry OK for ${coin.id} (round ${round})`);
+          } else {
+            stillPending.push({
+              coin,
+              filePath,
+              resultIndex,
+              reason: capture.reason,
+            });
+            results[resultIndex].loadAttempts = attempts;
+            results[resultIndex].chartPending = true;
+            console.log(
+              `Retry still not ready for ${coin.id} (${capture.reason}) — round ${round}`
+            );
+          }
+
+          onProgress?.({
+            phase: "done",
+            current: j + 1,
+            total: pendingRetry.length,
+            coin: coin.id,
+            result: results[resultIndex],
+          });
+        } catch (err) {
+          stillPending.push({
+            coin,
+            filePath,
+            resultIndex,
+            reason: err.message,
+          });
+          results[resultIndex] = {
+            coin: coin.id,
+            status: "error",
+            error: err.message,
+            durationMs: Date.now() - startedAt,
+            loadAttempts: round + 1,
+          };
+          onProgress?.({
+            phase: "done",
+            current: j + 1,
+            total: pendingRetry.length,
+            coin: coin.id,
+            result: results[resultIndex],
+          });
+        }
+      }
+
+      pendingRetry.length = 0;
+      pendingRetry.push(...stillPending);
+    }
+
+    for (const item of pendingRetry) {
+      const prev = results[item.resultIndex];
+      const attempts = prev?.loadAttempts || round + 1;
+      results[item.resultIndex] = {
+        coin: item.coin.id,
+        status: "error",
+        error: `Chart or indicators not loaded after ${attempts} capture(s) (${item.reason})`,
+        file: item.filePath,
+        loadAttempts: attempts,
+      };
     }
   } finally {
     if (page) await page.close().catch(() => {});

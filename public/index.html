@@ -29,6 +29,12 @@
           <button class="menu-item" data-view="signals">
             <span class="menu-icon">▣</span> Signal Chart
           </button>
+          <button class="menu-item" data-view="trades">
+            <span class="menu-icon">≡</span> Trade Journal
+          </button>
+          <button class="menu-item" data-view="local-analyze">
+            <span class="menu-icon">◉</span> Local Trade Analyze
+          </button>
           <button class="menu-item" data-view="settings">
             <span class="menu-icon">⚙</span> Settings
           </button>
@@ -136,7 +142,7 @@
           <header class="page-header">
             <div>
               <h2>Signal Chart</h2>
-              <p class="subtitle">Buy and sell signals per coin per day</p>
+              <p class="subtitle">Buy/sell signals per coin — raw and guideline-passed</p>
             </div>
             <div class="header-actions">
               <label class="inline-label">
@@ -153,8 +159,79 @@
             </div>
           </header>
           <section id="signalChartSummary" class="signal-summary meta"></section>
-          <div id="signalChartBars" class="signal-bars"></div>
+          <div id="signalChartBars" class="signal-chart-wrap"></div>
           <div id="signalChartTable" class="coins-table signal-table"></div>
+        </section>
+
+        <!-- Trade Journal view -->
+        <section id="view-trades" class="view">
+          <header class="page-header">
+            <div>
+              <h2>Trade Journal</h2>
+              <p class="subtitle">Every auto-trade decision with chart analysis and Future Trend Pro checklist</p>
+            </div>
+            <div class="header-actions">
+              <label class="inline-label">
+                Period
+                <select id="pnlDaysSelect">
+                  <option value="7">7 days</option>
+                  <option value="30" selected>30 days</option>
+                  <option value="90">90 days</option>
+                </select>
+              </label>
+              <label class="inline-label">
+                Filter
+                <select id="tradeJournalFilter">
+                  <option value="all">All</option>
+                  <option value="ok">Executed</option>
+                  <option value="skipped">Blocked</option>
+                  <option value="error">Errors</option>
+                </select>
+              </label>
+              <button id="refreshTradeJournalBtn" class="btn btn-secondary">Refresh</button>
+            </div>
+          </header>
+          <section id="pnlReportSection" class="pnl-report-section"></section>
+          <section id="tradeJournalSummary" class="meta trade-journal-summary"></section>
+          <div id="tradeJournalList" class="trade-journal-list"></div>
+          <div id="tradeJournalDetail" class="trade-journal-detail hidden"></div>
+        </section>
+
+        <!-- Local Trade Analyze view -->
+        <section id="view-local-analyze" class="view">
+          <header class="page-header">
+            <div>
+              <h2>Local Trade Analyze</h2>
+              <p class="subtitle">Paper trades from screenshot history — all signals assumed valid, then next 3 captures</p>
+            </div>
+            <div class="header-actions">
+              <label class="inline-label">
+                Days
+                <select id="localAnalyzeDays">
+                  <option value="3">3 days</option>
+                  <option value="7" selected>7 days</option>
+                  <option value="14">14 days</option>
+                  <option value="30">30 days</option>
+                </select>
+              </label>
+              <label class="inline-label">
+                SS sets
+                <select id="localAnalyzeMaxSets">
+                  <option value="40">40</option>
+                  <option value="80" selected>80</option>
+                  <option value="120">120</option>
+                  <option value="200">200</option>
+                </select>
+              </label>
+              <button id="runLocalAnalyzeBtn" class="btn btn-primary">Run Analysis</button>
+            </div>
+          </header>
+          <p id="localAnalyzeStatus" class="field-hint">Click Run Analysis to simulate trades from saved screenshots.</p>
+          <section id="localAnalyzeSummary" class="local-analyze-summary"></section>
+          <div id="localAnalyzeCoinTable" class="coins-table"></div>
+          <div id="localAnalyzeListHeader" class="local-analyze-list-header hidden"></div>
+          <div id="localAnalyzeList" class="local-analyze-list"></div>
+          <div id="localAnalyzeDetail" class="local-analyze-detail hidden"></div>
         </section>
 
         <!-- Settings view -->
@@ -217,6 +294,38 @@
                       <option value="W">Weekly</option>
                     </select>
                   </label>
+                </div>
+
+                <div class="settings-group">
+                  <h4>Screenshot capture</h4>
+                  <label>
+                    Wait before capture (seconds)
+                    <input
+                      type="number"
+                      name="screenshotWaitSeconds"
+                      min="0"
+                      max="60"
+                      step="1"
+                      required
+                    />
+                  </label>
+                  <p class="field-hint">
+                    Extra delay after the chart loads so indicators finish rendering (default 5 sec).
+                  </p>
+                  <label>
+                    Max load retries
+                    <input
+                      type="number"
+                      name="chartLoadMaxRetries"
+                      min="1"
+                      max="12"
+                      step="1"
+                      required
+                    />
+                  </label>
+                  <p class="field-hint">
+                    Extra retry rounds only for coins whose chart or indicator table did not load (default 6).
+                  </p>
                 </div>
 
                 <div class="settings-group">
@@ -300,6 +409,13 @@
                     <input type="checkbox" name="autoTradeEnabled" />
                     Enable auto-trade on signals
                   </label>
+                  <label class="checkbox-label">
+                    <input type="checkbox" name="autoTradeRequireGuidelines" checked />
+                    Require Future Trend Pro checklist (table + 15m)
+                  </label>
+                  <p class="field-hint">
+                    Blocks trades unless Bias, Supertrend, MACD, ADX 20+, VWAP, and EMA Cloud all match the signal direction. Never trades on NEUTRAL bias.
+                  </p>
                   <label class="checkbox-label">
                     <input type="checkbox" name="binanceTestnet" />
                     Use Binance Futures Testnet

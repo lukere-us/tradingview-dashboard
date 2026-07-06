@@ -14,16 +14,19 @@ const {
   autoRefreshMs,
   publicSettings,
 } = require("./services/settingsStore");
+const { getPnLReport } = require("./services/pnlReport");
 const {
   testBinanceConnection,
   listTrades,
+  getTradeById,
 } = require("./services/binanceTrade");
 const {
   getSessionStatus,
   openLoginBrowser,
   closeLoginBrowser,
 } = require("./services/tradingviewSession");
-const { getAlerts, refreshPrices } = require("./services/priceAlerts");
+const { getAlerts, refreshPrices, loadPriceStore } = require("./services/priceAlerts");
+const { runLocalTradeAnalysis } = require("./services/localTradeAnalyze");
 const { getSignals, updateSignalsForCoins } = require("./services/signalsStore");
 const { getSignalStats } = require("./services/signalHistoryStore");
 
@@ -38,7 +41,7 @@ function emptySignalAnalysis() {
   };
 }
 
-async function runSignalAnalysis(coinIds) {
+async function runSignalAnalysis(coinIds, historySetId = null) {
   if (coinIds.length === 0 || captureState.signalAnalysis?.running) return;
 
   captureState.signalAnalysis = {
@@ -58,7 +61,7 @@ async function runSignalAnalysis(coinIds) {
         captureState.signalAnalysis.completed.push(event.coinId);
         captureState.signalAnalysis.results[event.coinId] = event.result;
       }
-    });
+    }, { historySetId });
   } finally {
     captureState.signalAnalysis.running = false;
     captureState.signalAnalysis.current = null;
@@ -169,10 +172,22 @@ async function runCapture(trigger = "manual", options = {}) {
           captureState.progress.current = event.current;
           captureState.progress.currentCoin = event.coin;
           captureState.progress.currentCoinStartedAt = event.startedAt || Date.now();
+          captureState.progress.retryAttempt = null;
+          captureState.progress.retryMax = null;
+          captureState.progress.retryReason = null;
+        } else if (event.phase === "retry") {
+          captureState.progress.current = event.current;
+          captureState.progress.currentCoin = event.coin;
+          captureState.progress.retryAttempt = event.attempt;
+          captureState.progress.retryMax = event.maxRetries;
+          captureState.progress.retryReason = event.reason;
         } else if (event.phase === "done") {
           captureState.progress.partialResults.push(event.result);
           captureState.progress.currentCoin = null;
           captureState.progress.currentCoinStartedAt = null;
+          captureState.progress.retryAttempt = null;
+          captureState.progress.retryMax = null;
+          captureState.progress.retryReason = null;
 
           if (isPartial) {
             const others = captureState.lastResults.filter(
@@ -201,7 +216,19 @@ async function runCapture(trigger = "manual", options = {}) {
     captureState.lastRun = { at: new Date().toISOString(), trigger, group, coinId };
 
     if (results.length > 0) {
-      await archiveScreenshotSet({
+      await refreshPrices(captureList, { rotatePrevious: true }).catch((err) => {
+        console.error("Price refresh failed:", err.message);
+      });
+
+      const priceStore = await loadPriceStore().catch(() => ({ current: {} }));
+      const snapshotPrices = {};
+      for (const coin of captureList) {
+        if (priceStore.current?.[coin.id]?.price != null) {
+          snapshotPrices[coin.id] = priceStore.current[coin.id].price;
+        }
+      }
+
+      const archived = await archiveScreenshotSet({
         trigger: coinId
           ? `${trigger}:${coinId}`
           : group && group !== "all"
@@ -209,16 +236,15 @@ async function runCapture(trigger = "manual", options = {}) {
             : trigger,
         coins: captureList,
         results,
+        prices: Object.keys(snapshotPrices).length ? snapshotPrices : null,
       });
 
-      await refreshPrices(captureList, { rotatePrevious: true }).catch((err) => {
-        console.error("Price refresh failed:", err.message);
-      });
-
-      const okIds = results.filter((r) => r.status === "ok").map((r) => r.coin);
+      const okIds = results
+        .filter((r) => r.status === "ok" && !r.chartPending)
+        .map((r) => r.coin);
       if (okIds.length > 0) {
         captureState.progress = null;
-        await runSignalAnalysis(okIds).catch((err) => {
+        await runSignalAnalysis(okIds, archived.id).catch((err) => {
           console.error("Chart signal analysis failed:", err.message);
         });
       }
@@ -254,6 +280,8 @@ app.put("/api/settings", async (req, res) => {
       "chartInterval",
       "alertThresholdPercent",
       "historyPerPage",
+      "screenshotWaitSeconds",
+      "chartLoadMaxRetries",
       "autoTradeEnabled",
       "binanceApiKey",
       "binanceApiSecret",
@@ -295,9 +323,43 @@ app.post("/api/binance/test", async (_req, res) => {
 
 app.get("/api/trades", async (req, res) => {
   try {
-    const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 50));
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
     const trades = await listTrades(limit);
     res.json({ trades });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/trades/:id", async (req, res) => {
+  try {
+    const trade = await getTradeById(req.params.id);
+    if (!trade) {
+      return res.status(404).json({ error: "Trade not found" });
+    }
+    res.json({ trade });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/pnl-report", async (req, res) => {
+  try {
+    const days = Math.min(90, Math.max(1, Number(req.query.days) || 30));
+    const report = await getPnLReport(settings, { days });
+    res.json({ report });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/local-trade-analysis", async (req, res) => {
+  try {
+    const days = Math.min(90, Math.max(1, Number(req.query.days) || 30));
+    const maxSets = Math.min(300, Math.max(10, Number(req.query.maxSets) || 80));
+    const coinId = req.query.coinId || null;
+    const result = await runLocalTradeAnalysis({ days, coinId, maxSets });
+    res.json({ analysis: result });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

@@ -4,6 +4,8 @@ const views = {
   coins: document.getElementById("view-coins"),
   compare: document.getElementById("view-compare"),
   signals: document.getElementById("view-signals"),
+  trades: document.getElementById("view-trades"),
+  localAnalyze: document.getElementById("view-local-analyze"),
   settings: document.getElementById("view-settings"),
 };
 
@@ -50,6 +52,32 @@ const refreshSignalChartBtn = document.getElementById("refreshSignalChartBtn");
 const signalChartSummary = document.getElementById("signalChartSummary");
 const signalChartBars = document.getElementById("signalChartBars");
 const signalChartTable = document.getElementById("signalChartTable");
+
+const tradeJournalFilter = document.getElementById("tradeJournalFilter");
+const pnlDaysSelect = document.getElementById("pnlDaysSelect");
+const pnlReportSection = document.getElementById("pnlReportSection");
+const refreshTradeJournalBtn = document.getElementById("refreshTradeJournalBtn");
+const tradeJournalSummary = document.getElementById("tradeJournalSummary");
+const tradeJournalList = document.getElementById("tradeJournalList");
+const tradeJournalDetail = document.getElementById("tradeJournalDetail");
+
+let cachedTradeJournal = [];
+let cachedPnLReport = null;
+let selectedTradeId = null;
+
+const localAnalyzeDays = document.getElementById("localAnalyzeDays");
+const localAnalyzeMaxSets = document.getElementById("localAnalyzeMaxSets");
+const runLocalAnalyzeBtn = document.getElementById("runLocalAnalyzeBtn");
+const localAnalyzeStatus = document.getElementById("localAnalyzeStatus");
+const localAnalyzeSummary = document.getElementById("localAnalyzeSummary");
+const localAnalyzeCoinTable = document.getElementById("localAnalyzeCoinTable");
+const localAnalyzeListHeader = document.getElementById("localAnalyzeListHeader");
+const localAnalyzeList = document.getElementById("localAnalyzeList");
+const localAnalyzeDetail = document.getElementById("localAnalyzeDetail");
+
+let cachedLocalAnalysis = null;
+let selectedLocalSimId = null;
+let selectedLocalAnalyzeCoinId = null;
 
 let statusPollTimer = null;
 let autoWatchTimer = null;
@@ -227,18 +255,20 @@ function signalHighlightClass(chartSignal) {
 }
 
 function renderTitleSignalResult(chartSignal) {
-  if (!chartSignal || chartSignal.signal === "none") {
-    return `<span class="card-analyze-status none"> · No signal</span>`;
+  // Only show a live label on the last 3 candles. Memory (no-repeat) stays server-side.
+  const live = chartSignal?.signal;
+  if (!live || live === "none") {
+    return "";
   }
 
-  const label = chartSignal.signal.toUpperCase();
+  const label = live.toUpperCase();
   const pos =
     chartSignal.position === "top"
       ? " top"
       : chartSignal.position === "bottom"
         ? " bottom"
         : "";
-  const cls = chartSignal.highlight || "flat";
+  const cls = chartSignal.highlight || live;
 
   return `<span class="card-analyze-status ${cls}"> · ${label}${pos}</span>`;
 }
@@ -249,7 +279,7 @@ function renderTitleAnalyzeStatus(coin, { signalAnalysis, chartSignal }) {
 
   if (signalAnalysis?.running && inQueue) {
     if (signalAnalysis.current === coin.id) {
-      return `<span class="card-analyze-status analyzing"> · Scanning chart edge…</span>`;
+      return `<span class="card-analyze-status analyzing"> · Scanning last 3 candles…</span>`;
     }
     if (signalAnalysis.completed?.includes(coin.id)) {
       const sig = signalAnalysis.results?.[coin.id] || chartSignal;
@@ -284,6 +314,12 @@ function getCoinVisualState(coin, { running, progress, resultMap }) {
       return { type: "image", live: true };
     }
     if (progress.currentCoin === coin.id) {
+      if (progress.retryAttempt && progress.retryMax) {
+        return {
+          type: "loading",
+          label: `Retry ${progress.retryAttempt}/${progress.retryMax}…`,
+        };
+      }
       return { type: "loading", label: "Capturing..." };
     }
     return { type: "waiting", label: "Waiting..." };
@@ -362,7 +398,9 @@ function updateDurationLabels() {
     }
 
     if (progress.currentCoin === coinId && progress.currentCoinStartedAt) {
-      const label = formatDuration(now - progress.currentCoinStartedAt);
+      const label = progress.retryAttempt
+        ? `Retry ${progress.retryAttempt}/${progress.retryMax}`
+        : formatDuration(now - progress.currentCoinStartedAt);
       headerDuration.textContent = ` · ${label}`;
       if (loadTimer) loadTimer.textContent = label;
       return;
@@ -405,11 +443,12 @@ function attachScreenshotHandlers(container) {
 
 function showView(name) {
   currentView = name;
+  const viewKey = name === "local-analyze" ? "localAnalyze" : name;
   document.querySelectorAll(".menu-item").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.view === name);
   });
   Object.entries(views).forEach(([key, el]) => {
-    el.classList.toggle("active", key === name);
+    el.classList.toggle("active", key === viewKey);
   });
 
   if (name === "history") refreshHistoryList();
@@ -417,6 +456,11 @@ function showView(name) {
   if (name === "settings") loadSettingsForm();
   if (name === "compare") renderCompareView();
   if (name === "signals") loadSignalChart();
+  if (name === "trades") loadTradeJournal();
+  if (name === "local-analyze" && !cachedLocalAnalysis) {
+    localAnalyzeStatus.textContent =
+      "Click Run Analysis to simulate paper trades from screenshot history.";
+  }
 }
 
 function renderGroupFilters() {
@@ -588,19 +632,114 @@ async function loadSignalChart() {
   }
 }
 
+function signalChartYMax(coins) {
+  const peak = Math.max(
+    0,
+    ...coins.map((c) =>
+      Math.max(
+        c.totals.buy || 0,
+        c.totals.sell || 0,
+        c.totals.passedBuy || 0,
+        c.totals.passedSell || 0
+      )
+    )
+  );
+  if (peak <= 4) return 4;
+  return Math.ceil(peak / 2) * 2;
+}
+
+function renderSignalColumnChart(coins) {
+  const yMax = signalChartYMax(coins);
+  const ticks = [];
+  for (let v = yMax; v >= 0; v -= Math.max(1, Math.round(yMax / 4))) {
+    if (!ticks.includes(v)) ticks.push(v);
+  }
+  if (ticks[ticks.length - 1] !== 0) ticks.push(0);
+
+  const groups = coins
+    .map((coin) => {
+      const buyH = yMax > 0 ? (coin.totals.buy / yMax) * 100 : 0;
+      const sellH = yMax > 0 ? (coin.totals.sell / yMax) * 100 : 0;
+      const passedBuyH = yMax > 0 ? ((coin.totals.passedBuy || 0) / yMax) * 100 : 0;
+      const passedSellH = yMax > 0 ? ((coin.totals.passedSell || 0) / yMax) * 100 : 0;
+      return `
+        <div class="signal-col-group">
+          <div class="signal-col-bars">
+            <div
+              class="signal-col buy"
+              style="height:${buyH}%"
+              title="${coin.name}: ${coin.totals.buy} buy"
+            >
+              <span class="signal-col-value">${coin.totals.buy}</span>
+            </div>
+            <div
+              class="signal-col passed buy"
+              style="height:${passedBuyH}%"
+              title="${coin.name}: ${coin.totals.passedBuy || 0} passed buy"
+            >
+              <span class="signal-col-value">${coin.totals.passedBuy || 0}</span>
+            </div>
+            <div
+              class="signal-col sell"
+              style="height:${sellH}%"
+              title="${coin.name}: ${coin.totals.sell} sell"
+            >
+              <span class="signal-col-value">${coin.totals.sell}</span>
+            </div>
+            <div
+              class="signal-col passed sell"
+              style="height:${passedSellH}%"
+              title="${coin.name}: ${coin.totals.passedSell || 0} passed sell"
+            >
+              <span class="signal-col-value">${coin.totals.passedSell || 0}</span>
+            </div>
+          </div>
+          <div class="signal-col-name">${coin.name}</div>
+        </div>
+      `;
+    })
+    .join("");
+
+  return `
+    <div class="signal-column-chart">
+      <div class="signal-chart-legend">
+        <span class="signal-legend-item buy"><i></i> Buy</span>
+        <span class="signal-legend-item passed buy"><i></i> Passed buy</span>
+        <span class="signal-legend-item sell"><i></i> Sell</span>
+        <span class="signal-legend-item passed sell"><i></i> Passed sell</span>
+      </div>
+      <div class="signal-chart-body">
+        <div class="signal-y-axis" aria-hidden="true">
+          ${ticks.map((t) => `<span>${t}</span>`).join("")}
+        </div>
+        <div class="signal-plot">
+          <div class="signal-plot-grid">
+            ${ticks.map(() => `<div class="signal-grid-line"></div>`).join("")}
+          </div>
+          <div class="signal-plot-cols">
+            ${groups}
+          </div>
+        </div>
+      </div>
+      <div class="signal-x-axis-label">Coin</div>
+    </div>
+  `;
+}
+
 function renderSignalChart(data) {
-  const { days = [], coins = [], totals = { buy: 0, sell: 0 } } = data;
+  const {
+    days = [],
+    coins = [],
+    totals = { buy: 0, sell: 0, passedBuy: 0, passedSell: 0 },
+  } = data;
 
   signalChartSummary.innerHTML = `
-    <p><strong>Buy signals:</strong> <span class="signal-total buy">${totals.buy}</span></p>
-    <p><strong>Sell signals:</strong> <span class="signal-total sell">${totals.sell}</span></p>
+    <p><strong>Buy signals:</strong> <span class="signal-total buy">${totals.buy}</span>
+      · <strong>Passed:</strong> <span class="signal-total passed buy">${totals.passedBuy || 0}</span></p>
+    <p><strong>Sell signals:</strong> <span class="signal-total sell">${totals.sell}</span>
+      · <strong>Passed:</strong> <span class="signal-total passed sell">${totals.passedSell || 0}</span></p>
     <p><strong>Range:</strong> ${days[0] || "—"} → ${days[days.length - 1] || "—"}</p>
   `;
-
-  const maxTotal = Math.max(
-    1,
-    ...coins.map((c) => c.totals.buy + c.totals.sell)
-  );
 
   if (coins.length === 0) {
     signalChartBars.innerHTML = `<p class="empty-state">No coins configured.</p>`;
@@ -608,24 +747,7 @@ function renderSignalChart(data) {
     return;
   }
 
-  signalChartBars.innerHTML = coins
-    .map((coin) => {
-      const buyPct = (coin.totals.buy / maxTotal) * 100;
-      const sellPct = (coin.totals.sell / maxTotal) * 100;
-      return `
-        <div class="signal-bar-row">
-          <div class="signal-bar-label">
-            <strong>${coin.name}</strong>
-            <span>${coin.totals.buy} buy · ${coin.totals.sell} sell</span>
-          </div>
-          <div class="signal-bar-track">
-            <div class="signal-bar buy" style="width:${buyPct}%" title="${coin.totals.buy} buy"></div>
-            <div class="signal-bar sell" style="width:${sellPct}%" title="${coin.totals.sell} sell"></div>
-          </div>
-        </div>
-      `;
-    })
-    .join("");
+  signalChartBars.innerHTML = renderSignalColumnChart(coins);
 
   const dayHeaders = days.map((d) => `<th>${formatDayLabel(d)}</th>`).join("");
 
@@ -635,7 +757,9 @@ function renderSignalChart(data) {
         <tr>
           <th>Coin</th>
           <th>Buy</th>
+          <th>Passed buy</th>
           <th>Sell</th>
+          <th>Passed sell</th>
           ${dayHeaders}
         </tr>
       </thead>
@@ -644,14 +768,28 @@ function renderSignalChart(data) {
           .map((coin) => {
             const dayCells = days
               .map((day) => {
-                const cell = coin.days[day] || { buy: 0, sell: 0 };
-                if (cell.buy === 0 && cell.sell === 0) {
+                const cell = coin.days[day] || {
+                  buy: 0,
+                  sell: 0,
+                  passedBuy: 0,
+                  passedSell: 0,
+                };
+                if (
+                  cell.buy === 0 &&
+                  cell.sell === 0 &&
+                  cell.passedBuy === 0 &&
+                  cell.passedSell === 0
+                ) {
                   return `<td class="signal-cell empty">—</td>`;
                 }
                 return `<td class="signal-cell">
                   <span class="signal-cell-buy">${cell.buy}</span>
                   <span class="signal-cell-sep">/</span>
+                  <span class="signal-cell-passed buy">${cell.passedBuy || 0}</span>
+                  <span class="signal-cell-sep">·</span>
                   <span class="signal-cell-sell">${cell.sell}</span>
+                  <span class="signal-cell-sep">/</span>
+                  <span class="signal-cell-passed sell">${cell.passedSell || 0}</span>
                 </td>`;
               })
               .join("");
@@ -660,7 +798,9 @@ function renderSignalChart(data) {
               <tr>
                 <td><strong>${coin.name}</strong><div class="card-symbol">${coin.id}</div></td>
                 <td class="signal-cell-buy"><strong>${coin.totals.buy}</strong></td>
+                <td class="signal-cell-passed buy"><strong>${coin.totals.passedBuy || 0}</strong></td>
                 <td class="signal-cell-sell"><strong>${coin.totals.sell}</strong></td>
+                <td class="signal-cell-passed sell"><strong>${coin.totals.passedSell || 0}</strong></td>
                 ${dayCells}
               </tr>
             `;
@@ -668,8 +808,803 @@ function renderSignalChart(data) {
           .join("")}
       </tbody>
     </table>
-    <p class="field-hint">Each day cell shows buy / sell counts. A signal is counted once when it newly appears (not on every capture).</p>
+    <p class="field-hint">Signals are saved at capture time. Buy/sell = new chart signal; Passed = signal + Future Trend Pro checklist OK. Day cells: buy / passed · sell / passed.</p>
   `;
+}
+
+function tradeStatusLabel(status) {
+  if (status === "ok") return "Executed";
+  if (status === "skipped") return "Blocked";
+  if (status === "error") return "Error";
+  return status || "—";
+}
+
+function tradeStatusClass(status) {
+  if (status === "ok") return "trade-status-ok";
+  if (status === "skipped") return "trade-status-blocked";
+  if (status === "error") return "trade-status-error";
+  return "";
+}
+
+function renderChecklistTable(checklist) {
+  if (!checklist?.length) {
+    return `<p class="empty-state">No checklist data saved for this trade.</p>`;
+  }
+
+  return `
+    <table class="trade-checklist-table">
+      <thead>
+        <tr>
+          <th>Check</th>
+          <th>Required</th>
+          <th>Chart shows</th>
+          <th>Result</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${checklist
+          .map(
+            (item) => `
+          <tr class="${item.passed ? "check-pass" : "check-fail"}">
+            <td>${item.label}</td>
+            <td>${item.required}</td>
+            <td>${item.actual || "—"}</td>
+            <td class="check-result">${item.passed ? "✓ Pass" : "✗ Fail"}</td>
+          </tr>
+        `
+          )
+          .join("")}
+      </tbody>
+    </table>
+  `;
+}
+
+function renderTradeActions(actions) {
+  if (!actions?.length) return `<p class="field-hint">No Binance orders for this entry.</p>`;
+  return `
+    <ul class="trade-actions-list">
+      ${actions
+        .map((a) => {
+          if (a.action === "take_profit" || a.action === "stop_loss") {
+            return `<li><strong>${a.action}</strong> @ ${a.stopPrice} (${a.percent}%)</li>`;
+          }
+          const qty = a.quantity != null ? ` qty ${a.quantity}` : "";
+          const price = a.price != null ? ` @ ${a.price}` : "";
+          return `<li><strong>${a.action}</strong>${qty}${price}</li>`;
+        })
+        .join("")}
+    </ul>
+  `;
+}
+
+function renderTradeJournalDetail(trade) {
+  const analysis = trade.analysis || {};
+  const chart = analysis.chartSignal || {};
+  const settings = analysis.tradeSettings || {};
+  const screenshot = analysis.screenshotUrl || `/screenshots/current/${trade.coinId}.png`;
+  const signalLabel = (trade.signal || "—").toUpperCase();
+  const pos = chart.position ? ` (${chart.position})` : "";
+
+  tradeJournalDetail.innerHTML = `
+    <div class="trade-detail-header">
+      <button type="button" class="btn btn-secondary btn-sm" id="tradeDetailBackBtn">← Back to list</button>
+      <div class="trade-detail-title">
+        <h3>${trade.coinName || trade.coinId} · ${signalLabel}</h3>
+        <span class="trade-status-badge ${tradeStatusClass(trade.status)}">${tradeStatusLabel(trade.status)}</span>
+      </div>
+      <p class="field-hint">${formatTime(trade.at)} · ${trade.symbol || ""}</p>
+    </div>
+
+    <div class="trade-detail-grid">
+      <div class="trade-detail-chart">
+        <h4>Chart at decision time</h4>
+        <div class="trade-detail-image-wrap ${chart.highlight ? `signal-${chart.highlight}` : ""}">
+          <img src="${screenshot}?t=${encodeURIComponent(trade.at)}" alt="${trade.coinName} chart" />
+        </div>
+        <p class="field-hint">
+          Image signal: <strong>${(chart.signal || "none").toUpperCase()}${pos}</strong>
+          ${chart.analyzedAt ? ` · analyzed ${formatTime(chart.analyzedAt)}` : ""}
+        </p>
+      </div>
+
+      <div class="trade-detail-checklist">
+        <h4>Future Trend Pro checklist</h4>
+        <p class="field-hint">${analysis.guideSummary || "All 5 conditions + Bias must agree before entry."}</p>
+        ${renderChecklistTable(analysis.checklist)}
+        ${
+          analysis.guidelineFailures?.length
+            ? `<div class="trade-block-reasons"><strong>Blocked because:</strong><ul>${analysis.guidelineFailures.map((f) => `<li>${f}</li>`).join("")}</ul></div>`
+            : analysis.guidelinesPassed
+              ? `<p class="field-hint ok">All guideline checks passed.</p>`
+              : ""
+        }
+      </div>
+    </div>
+
+    <div class="trade-detail-panels">
+      <div class="trade-detail-panel">
+        <h4>Trade settings used</h4>
+        <ul class="trade-meta-list">
+          <li>Amount: <strong>${settings.tradeAmountUsdt ?? trade.usdt ?? "—"} USDT</strong></li>
+          <li>Leverage: <strong>${settings.tradeLeverage ?? trade.leverage ?? "—"}x</strong></li>
+          <li>Mode: <strong>${settings.tradeMode ?? trade.mode ?? "—"}</strong></li>
+          <li>Margin: <strong>${settings.tradeMarginType ?? "—"}</strong></li>
+          <li>TP / SL: <strong>${settings.tradeTpPercent ?? trade.tpPercent ?? "—"}% / ${settings.tradeSlPercent ?? trade.slPercent ?? "—"}%</strong></li>
+          <li>Interval: <strong>${settings.chartInterval || "15"}m</strong></li>
+          <li>Network: <strong>${settings.testnet || trade.testnet ? "Testnet" : "Live"}</strong></li>
+        </ul>
+      </div>
+      <div class="trade-detail-panel">
+        <h4>Binance result</h4>
+        ${
+          trade.status === "error"
+            ? `<p class="text-error">${trade.error || "Trade failed"}</p>`
+            : trade.status === "skipped"
+              ? `<p class="text-muted">${trade.reason || "Trade blocked by guidelines"}</p>`
+              : renderTradeActions(trade.actions)
+        }
+      </div>
+    </div>
+  `;
+
+  document.getElementById("tradeDetailBackBtn")?.addEventListener("click", () => {
+    selectedTradeId = null;
+    tradeJournalDetail.classList.add("hidden");
+    tradeJournalList.classList.remove("hidden");
+  });
+
+  tradeJournalDetail.querySelector(".trade-detail-image-wrap img")?.addEventListener("click", (e) => {
+    openLightbox(e.target.src, `${trade.coinName} · ${signalLabel}`);
+  });
+}
+
+function renderTradeJournalList(trades) {
+  const filter = tradeJournalFilter?.value || "all";
+  const filtered =
+    filter === "all" ? trades : trades.filter((t) => t.status === filter);
+
+  if (filtered.length === 0) {
+    tradeJournalList.innerHTML = `<p class="empty-state">No trade journal entries yet. Enable auto-trade and wait for a signal.</p>`;
+    return;
+  }
+
+  tradeJournalList.innerHTML = filtered
+    .map((trade) => {
+      const analysis = trade.analysis || {};
+      const chart = analysis.chartSignal || {};
+      const passed = analysis.guidelinesPassed;
+      const checklist = analysis.checklist || [];
+      const passCount = checklist.filter((c) => c.passed).length;
+      const totalChecks = checklist.length;
+      const thumb = analysis.screenshotUrl || `/screenshots/current/${trade.coinId}.png`;
+
+      return `
+        <article class="trade-journal-card" data-trade-id="${trade.id}">
+          <div class="trade-journal-thumb">
+            <img src="${thumb}?t=${encodeURIComponent(trade.at)}" alt="" loading="lazy" />
+          </div>
+          <div class="trade-journal-body">
+            <div class="trade-journal-top">
+              <strong>${trade.coinName || trade.coinId}</strong>
+              <span class="signal-badge signal-${trade.signal || "none"}">${(trade.signal || "—").toUpperCase()}</span>
+              <span class="trade-status-badge ${tradeStatusClass(trade.status)}">${tradeStatusLabel(trade.status)}</span>
+            </div>
+            <p class="trade-journal-meta">${formatTime(trade.at)} · ${trade.symbol || ""}</p>
+            <p class="trade-journal-signal">
+              Chart: <strong>${(chart.signal || "none").toUpperCase()}</strong>
+              ${chart.position ? ` · ${chart.position}` : ""}
+            </p>
+            ${
+              totalChecks
+                ? `<p class="trade-journal-checks">Guideline checks: <strong>${passCount}/${totalChecks}</strong> ${passed ? "· ready" : "· blocked"}</p>`
+                : ""
+            }
+            ${
+              trade.status === "skipped"
+                ? `<p class="trade-journal-reason">${trade.reason || "Blocked by guidelines"}</p>`
+                : trade.status === "error"
+                  ? `<p class="trade-journal-reason text-error">${trade.error || "Error"}</p>`
+                  : ""
+            }
+          </div>
+          <button type="button" class="btn btn-secondary btn-sm trade-journal-open">Details</button>
+        </article>
+      `;
+    })
+    .join("");
+
+  tradeJournalList.querySelectorAll(".trade-journal-card").forEach((card) => {
+    const open = () => {
+      const id = card.dataset.tradeId;
+      const trade = cachedTradeJournal.find((t) => t.id === id);
+      if (!trade) return;
+      selectedTradeId = id;
+      tradeJournalList.classList.add("hidden");
+      tradeJournalDetail.classList.remove("hidden");
+      renderTradeJournalDetail(trade);
+    };
+    card.querySelector(".trade-journal-open")?.addEventListener("click", open);
+    card.addEventListener("click", (e) => {
+      if (e.target.closest(".trade-journal-open")) return;
+      open();
+    });
+  });
+}
+
+function formatUsd(value, { signed = true } = {}) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "—";
+  const prefix = signed && n > 0 ? "+" : "";
+  return `${prefix}$${n.toFixed(2)}`;
+}
+
+function pnlClass(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n === 0) return "pnl-neutral";
+  return n > 0 ? "pnl-profit" : "pnl-loss";
+}
+
+function renderPnLReport(report) {
+  if (!pnlReportSection) return;
+
+  if (!report) {
+    pnlReportSection.innerHTML = "";
+    return;
+  }
+
+  const s = report.summary || {};
+  const local = report.local || {};
+
+  if (report.message && !report.connected) {
+    pnlReportSection.innerHTML = `
+      <div class="pnl-report-wrap">
+        <h3 class="pnl-report-title">Profit &amp; Loss Report</h3>
+        <p class="field-hint warn-hint">${report.message}</p>
+        <div class="pnl-cards">
+          <div class="pnl-card">
+            <span class="pnl-card-label">Auto-trades executed</span>
+            <strong>${local.executed || 0}</strong>
+          </div>
+          <div class="pnl-card">
+            <span class="pnl-card-label">Volume entered</span>
+            <strong>${formatUsd(local.totalNotional, { signed: false })}</strong>
+          </div>
+          <div class="pnl-card">
+            <span class="pnl-card-label">Blocked / errors</span>
+            <strong>${(local.blocked || 0) + (local.errors || 0)}</strong>
+          </div>
+        </div>
+      </div>
+    `;
+    return;
+  }
+
+  const dayRows = (report.byDay || [])
+    .map(
+      (d) => `
+      <tr>
+        <td>${d.date}</td>
+        <td class="${pnlClass(d.realizedPnl)}">${formatUsd(d.realizedPnl)}</td>
+        <td class="${pnlClass(d.commission)}">${formatUsd(d.commission)}</td>
+        <td class="${pnlClass(d.net)}">${formatUsd(d.net)}</td>
+        <td>${d.events}</td>
+      </tr>
+    `
+    )
+    .join("");
+
+  const symbolRows = (report.bySymbol || [])
+    .map(
+      (row) => `
+      <tr>
+        <td><strong>${row.symbol}</strong></td>
+        <td class="${pnlClass(row.realizedPnl)}">${formatUsd(row.realizedPnl)}</td>
+        <td class="${pnlClass(row.commission)}">${formatUsd(row.commission)}</td>
+        <td class="${pnlClass(row.net)}">${formatUsd(row.net)}</td>
+        <td>${row.wins}W / ${row.losses}L</td>
+      </tr>
+    `
+    )
+    .join("");
+
+  const openRows = (report.openPositions || [])
+    .map(
+      (p) => `
+      <tr>
+        <td><strong>${p.symbol}</strong></td>
+        <td>${p.side}</td>
+        <td>${p.size}</td>
+        <td>${formatUsd(p.entryPrice, { signed: false })}</td>
+        <td>${formatUsd(p.markPrice, { signed: false })}</td>
+        <td class="${pnlClass(p.unrealizedPnl)}">${formatUsd(p.unrealizedPnl)}</td>
+      </tr>
+    `
+    )
+    .join("");
+
+  const eventRows = (report.events || [])
+    .slice(0, 25)
+    .map(
+      (e) => `
+      <tr>
+        <td>${formatTime(e.at)}</td>
+        <td>${e.symbol}</td>
+        <td class="${pnlClass(e.amount)}">${formatUsd(e.amount)}</td>
+      </tr>
+    `
+    )
+    .join("");
+
+  pnlReportSection.innerHTML = `
+    <div class="pnl-report-wrap">
+      <h3 class="pnl-report-title">Profit &amp; Loss Report <span class="pnl-period">last ${report.days} days${report.testnet ? " · testnet" : ""}</span></h3>
+      ${report.error ? `<p class="field-hint warn-hint">${report.error}</p>` : ""}
+
+      <div class="pnl-cards">
+        <div class="pnl-card pnl-card-main ${pnlClass(s.netPnl)}">
+          <span class="pnl-card-label">Net P&amp;L</span>
+          <strong>${formatUsd(s.netPnl)}</strong>
+          <span class="pnl-card-sub">Realized + fees</span>
+        </div>
+        <div class="pnl-card ${pnlClass(s.realizedPnl)}">
+          <span class="pnl-card-label">Realized P&amp;L</span>
+          <strong>${formatUsd(s.realizedPnl)}</strong>
+        </div>
+        <div class="pnl-card ${pnlClass(s.unrealizedPnl)}">
+          <span class="pnl-card-label">Unrealized P&amp;L</span>
+          <strong>${formatUsd(s.unrealizedPnl)}</strong>
+          <span class="pnl-card-sub">${s.openPositions || 0} open</span>
+        </div>
+        <div class="pnl-card">
+          <span class="pnl-card-label">Wallet balance</span>
+          <strong>${s.walletBalance != null ? formatUsd(s.walletBalance, { signed: false }) : "—"}</strong>
+        </div>
+        <div class="pnl-card">
+          <span class="pnl-card-label">Win rate</span>
+          <strong>${s.winRate != null ? `${s.winRate}%` : "—"}</strong>
+          <span class="pnl-card-sub">${s.wins || 0}W / ${s.losses || 0}L</span>
+        </div>
+        <div class="pnl-card">
+          <span class="pnl-card-label">Auto-trades</span>
+          <strong>${local.executed || 0}</strong>
+          <span class="pnl-card-sub">${local.blocked || 0} blocked</span>
+        </div>
+      </div>
+
+      <div class="pnl-tables-grid">
+        <div class="pnl-table-panel">
+          <h4>Daily P&amp;L</h4>
+          ${
+            dayRows
+              ? `<table class="pnl-table"><thead><tr><th>Date</th><th>Realized</th><th>Fees</th><th>Net</th><th>Events</th></tr></thead><tbody>${dayRows}</tbody></table>`
+              : `<p class="empty-state">No closed P&amp;L in this period.</p>`
+          }
+        </div>
+        <div class="pnl-table-panel">
+          <h4>By symbol</h4>
+          ${
+            symbolRows
+              ? `<table class="pnl-table"><thead><tr><th>Symbol</th><th>Realized</th><th>Fees</th><th>Net</th><th>W/L</th></tr></thead><tbody>${symbolRows}</tbody></table>`
+              : `<p class="empty-state">No symbol breakdown yet.</p>`
+          }
+        </div>
+      </div>
+
+      ${
+        openRows
+          ? `<div class="pnl-table-panel"><h4>Open positions</h4><table class="pnl-table"><thead><tr><th>Symbol</th><th>Side</th><th>Size</th><th>Entry</th><th>Mark</th><th>Unrealized</th></tr></thead><tbody>${openRows}</tbody></table></div>`
+          : ""
+      }
+
+      ${
+        eventRows
+          ? `<div class="pnl-table-panel"><h4>Recent realized P&amp;L events</h4><table class="pnl-table"><thead><tr><th>Time</th><th>Symbol</th><th>P&amp;L</th></tr></thead><tbody>${eventRows}</tbody></table></div>`
+          : ""
+      }
+    </div>
+  `;
+}
+
+function renderTradeJournalSummary(trades) {
+  const executed = trades.filter((t) => t.status === "ok").length;
+  const blocked = trades.filter((t) => t.status === "skipped").length;
+  const errors = trades.filter((t) => t.status === "error").length;
+
+  tradeJournalSummary.innerHTML = `
+    <p><strong>${trades.length}</strong> total · <span class="trade-status-ok">${executed} executed</span> · <span class="trade-status-blocked">${blocked} blocked</span> · <span class="trade-status-error">${errors} errors</span></p>
+    <p class="field-hint">Every entry saves the chart screenshot, BUY/SELL signal, and full Future Trend Pro checklist from the trading guide.</p>
+  `;
+}
+
+async function loadTradeJournal() {
+  if (!tradeJournalList) return;
+
+  tradeJournalSummary.innerHTML = `<p>Loading trade journal…</p>`;
+  if (pnlReportSection) pnlReportSection.innerHTML = `<p class="field-hint">Loading P&amp;L…</p>`;
+  tradeJournalList.innerHTML = "";
+  tradeJournalDetail.classList.add("hidden");
+  tradeJournalList.classList.remove("hidden");
+
+  const days = Number(pnlDaysSelect?.value) || 30;
+
+  try {
+    const [tradesRes, pnlRes] = await Promise.all([
+      fetch("/api/trades?limit=100"),
+      fetch(`/api/pnl-report?days=${encodeURIComponent(days)}`),
+    ]);
+    const tradesData = await parseJsonResponse(tradesRes);
+    const pnlData = await parseJsonResponse(pnlRes);
+    if (!tradesRes.ok) throw new Error(tradesData.error);
+    if (!pnlRes.ok) throw new Error(pnlData.error);
+
+    cachedTradeJournal = tradesData.trades || [];
+    cachedPnLReport = pnlData.report || null;
+    renderPnLReport(cachedPnLReport);
+    renderTradeJournalSummary(cachedTradeJournal);
+    renderTradeJournalList(cachedTradeJournal);
+
+    if (selectedTradeId) {
+      const trade = cachedTradeJournal.find((t) => t.id === selectedTradeId);
+      if (trade) {
+        tradeJournalList.classList.add("hidden");
+        tradeJournalDetail.classList.remove("hidden");
+        renderTradeJournalDetail(trade);
+      }
+    }
+  } catch (err) {
+    tradeJournalSummary.innerHTML = `<p class="text-error">${err.message || "Failed to load trade journal."}</p>`;
+    if (pnlReportSection) pnlReportSection.innerHTML = "";
+    tradeJournalList.innerHTML = "";
+  }
+}
+
+function outcomeLabel(outcome, exitStep) {
+  if (outcome === "win_tp") {
+    return exitStep ? `Win · TP @ +${exitStep} SS` : "Win (TP)";
+  }
+  if (outcome === "loss_sl") {
+    return exitStep ? `Loss · SL @ +${exitStep} SS` : "Loss (SL)";
+  }
+  if (outcome === "after_3") return "Open after 3 SS";
+  return outcome || "—";
+}
+
+function outcomeClass(outcome) {
+  if (outcome === "win_tp") return "pnl-profit";
+  if (outcome === "loss_sl") return "pnl-loss";
+  return "pnl-neutral";
+}
+
+function renderLocalAnalyzeSummary(data) {
+  if (!localAnalyzeSummary || !data) return;
+
+  const t = data.totals || {};
+  const s = data.settings || {};
+
+  localAnalyzeSummary.innerHTML = `
+    <div class="local-summary-cards">
+      <div class="pnl-card pnl-card-main ${pnlClass(t.totalPnl)}">
+        <span class="pnl-card-label">Total simulated P&amp;L</span>
+        <strong>${formatUsd(t.totalPnl)}</strong>
+        <span class="pnl-card-sub">${t.simulated || 0} paper trades</span>
+      </div>
+      <div class="pnl-card">
+        <span class="pnl-card-label">Win rate</span>
+        <strong>${t.winRate != null ? `${t.winRate}%` : "—"}</strong>
+        <span class="pnl-card-sub">${t.wins || 0}W / ${t.losses || 0}L / ${t.openAfter3 || 0} open</span>
+      </div>
+      <div class="pnl-card">
+        <span class="pnl-card-label">Signals found</span>
+        <strong>${t.signalsDetected || 0}</strong>
+        <span class="pnl-card-sub">all assumed passed</span>
+      </div>
+      <div class="pnl-card">
+        <span class="pnl-card-label">SS sets used</span>
+        <strong>${data.setsUsed || 0}</strong>
+        <span class="pnl-card-sub">last ${data.maxSets || 80} max · ${data.forwardCaptures || 3} forward</span>
+      </div>
+    </div>
+    <p class="field-hint">
+      Uses signals saved at capture time (same source as Signal Chart).
+      <strong>Guidelines assumed passed</strong> for every signal.
+      Simulates <strong>${s.tradeAmountUsdt || 2} USDT</strong> × <strong>${s.tradeLeverage || 10}x</strong>
+      · TP <strong>${s.tradeTpPercent || 30}%</strong> · SL <strong>${s.tradeSlPercent || 30}%</strong>
+      · Mode <strong>${s.tradeMode || "long_only"}</strong>
+      · Outcome checked on +1, +2, +3 screenshots — stops as soon as TP or SL is hit.
+    </p>
+  `;
+}
+
+function renderLocalAnalyzeCoinTable(perCoin, activeCoinId = null) {
+  if (!localAnalyzeCoinTable) return;
+
+  if (!perCoin?.length) {
+    localAnalyzeCoinTable.innerHTML = "";
+    return;
+  }
+
+  localAnalyzeCoinTable.innerHTML = `
+    <table>
+      <thead>
+        <tr>
+          <th>Coin</th>
+          <th>Signals</th>
+          <th>Passed</th>
+          <th>Trades</th>
+          <th>W / L / Open</th>
+          <th>Win %</th>
+          <th>Sim P&amp;L</th>
+          <th>Report</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${perCoin
+          .map((row) => {
+            const c = row.counts || {};
+            const isActive = activeCoinId === row.coinId;
+            const hasTrades = (c.simulated || 0) > 0;
+            return `
+            <tr class="${isActive ? "local-analyze-row-active" : ""}">
+              <td><strong>${row.coinName}</strong><div class="card-symbol">${row.coinId}</div></td>
+              <td>${c.signalsDetected || 0}</td>
+              <td>${c.guidelinesPassed || 0}</td>
+              <td>${c.simulated || 0}</td>
+              <td>${c.wins || 0} / ${c.losses || 0} / ${c.openAfter3 || 0}</td>
+              <td>${c.winRate != null ? `${c.winRate}%` : "—"}</td>
+              <td class="${pnlClass(c.totalPnl)}">${formatUsd(c.totalPnl)}</td>
+              <td>
+                <button
+                  type="button"
+                  class="btn btn-secondary btn-sm local-analyze-view-btn"
+                  data-coin-id="${row.coinId}"
+                  ${hasTrades ? "" : "disabled"}
+                >View Report</button>
+              </td>
+            </tr>
+          `;
+          })
+          .join("")}
+      </tbody>
+    </table>
+  `;
+
+  localAnalyzeCoinTable.querySelectorAll(".local-analyze-view-btn").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      viewLocalAnalyzeCoinReport(btn.dataset.coinId);
+    });
+  });
+}
+
+function renderLocalAnalyzeListHeader(coinRow) {
+  if (!localAnalyzeListHeader) return;
+
+  if (!coinRow) {
+    localAnalyzeListHeader.classList.add("hidden");
+    localAnalyzeListHeader.innerHTML = "";
+    return;
+  }
+
+  const c = coinRow.counts || {};
+  localAnalyzeListHeader.classList.remove("hidden");
+  localAnalyzeListHeader.innerHTML = `
+    <div class="local-analyze-list-header-inner">
+      <div>
+        <h3>${coinRow.coinName} <span class="card-symbol">${coinRow.coinId}</span></h3>
+        <p class="field-hint">${c.simulated || 0} paper trade(s) · ${formatUsd(c.totalPnl)} sim P&amp;L · ${c.wins || 0}W / ${c.losses || 0}L / ${c.openAfter3 || 0} open</p>
+      </div>
+      <button type="button" class="btn btn-secondary btn-sm" id="localAnalyzeShowAllBtn">Show all coins</button>
+    </div>
+  `;
+
+  document.getElementById("localAnalyzeShowAllBtn")?.addEventListener("click", () => {
+    selectedLocalAnalyzeCoinId = null;
+    selectedLocalSimId = null;
+    renderLocalAnalyzeCoinTable(cachedLocalAnalysis?.perCoin, null);
+    renderLocalAnalyzeListHeader(null);
+    renderLocalAnalyzeList(cachedLocalAnalysis?.simulations || []);
+    localAnalyzeDetail.classList.add("hidden");
+    localAnalyzeList.classList.remove("hidden");
+  });
+}
+
+function viewLocalAnalyzeCoinReport(coinId) {
+  if (!cachedLocalAnalysis || !coinId) return;
+
+  const coinRow = cachedLocalAnalysis.perCoin?.find((r) => r.coinId === coinId);
+  const simulations =
+    cachedLocalAnalysis.simulations?.filter((s) => s.coinId === coinId) || [];
+
+  selectedLocalAnalyzeCoinId = coinId;
+  selectedLocalSimId = null;
+
+  renderLocalAnalyzeCoinTable(cachedLocalAnalysis.perCoin, coinId);
+  renderLocalAnalyzeListHeader(coinRow);
+  renderLocalAnalyzeList(simulations);
+
+  localAnalyzeDetail.classList.add("hidden");
+  localAnalyzeList.classList.remove("hidden");
+
+  localAnalyzeListHeader?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function renderLocalAnalyzeDetail(sim) {
+  if (!localAnalyzeDetail || !sim) return;
+
+  const simResult = sim.simulation || {};
+  const analysis = sim.analysis || {};
+  const checklist = analysis.checklist || [];
+
+  localAnalyzeDetail.innerHTML = `
+    <div class="trade-detail-header">
+      <button type="button" class="btn btn-secondary btn-sm" id="localDetailBackBtn">← Back to list</button>
+      <div class="trade-detail-title">
+        <h3>${sim.coinName} · ${(sim.signal || "").toUpperCase()}</h3>
+        <span class="trade-status-badge ${outcomeClass(simResult.outcome)}">${outcomeLabel(simResult.outcome, simResult.exitStep)}</span>
+        <span class="${pnlClass(simResult.pnlUsdt)}">${formatUsd(simResult.pnlUsdt)}</span>
+      </div>
+      <p class="field-hint">Entry ${formatTime(sim.entrySet.at)} @ ${simResult.entryPrice} → exit @ ${simResult.exitPrice} (SS +${simResult.exitStep || "?"})</p>
+    </div>
+
+    <div class="local-forward-grid">
+      <div class="local-ss-card">
+        <h4>Entry screenshot</h4>
+        <img src="${sim.entrySet.screenshotUrl}?t=${encodeURIComponent(sim.entrySet.at)}" alt="Entry" />
+        <p>Price: <strong>${sim.entrySet.price}</strong></p>
+      </div>
+      ${(sim.forwardSets || [])
+        .map(
+          (fs, idx) => `
+        <div class="local-ss-card">
+          <h4>+${idx + 1} SS</h4>
+          <img src="${fs.screenshotUrl}?t=${encodeURIComponent(fs.at)}" alt="Forward ${idx + 1}" />
+          <p>Price: <strong>${fs.price ?? "—"}</strong>
+          ${simResult.steps?.[idx] ? ` · <span class="${outcomeClass(simResult.steps[idx].status === "tp" ? "win_tp" : simResult.steps[idx].status === "sl" ? "loss_sl" : "")}">${simResult.steps[idx].status === "tp" ? "TP hit" : simResult.steps[idx].status === "sl" ? "SL hit" : simResult.steps[idx].status}</span>` : ""}
+          </p>
+        </div>
+      `
+        )
+        .join("")}
+    </div>
+
+    <div class="trade-detail-panels">
+      <div class="trade-detail-panel">
+        <h4>Simulated trade</h4>
+        <ul class="trade-meta-list">
+          <li>Entry: <strong>${simResult.entryPrice}</strong></li>
+          <li>TP target: <strong>${simResult.tpPrice}</strong></li>
+          <li>SL target: <strong>${simResult.slPrice}</strong></li>
+          <li>Exit: <strong>${simResult.exitPrice}</strong> (${outcomeLabel(simResult.outcome, simResult.exitStep)})</li>
+          <li>P&amp;L: <strong class="${pnlClass(simResult.pnlUsdt)}">${formatUsd(simResult.pnlUsdt)}</strong> (${simResult.pnlPercent}%)</li>
+          <li>Size: <strong>${simResult.usdt} USDT × ${simResult.leverage}x</strong></li>
+        </ul>
+      </div>
+      <div class="trade-detail-panel">
+        <h4>Guidelines</h4>
+        <p class="field-hint">Future Trend Pro checklist is <strong>assumed passed</strong> for this paper trade analysis.</p>
+        ${analysis.guidelinesAssumed ? "" : renderChecklistTable(checklist)}
+      </div>
+    </div>
+  `;
+
+  document.getElementById("localDetailBackBtn")?.addEventListener("click", () => {
+    selectedLocalSimId = null;
+    localAnalyzeDetail.classList.add("hidden");
+    localAnalyzeList.classList.remove("hidden");
+    if (selectedLocalAnalyzeCoinId && cachedLocalAnalysis) {
+      const simulations = cachedLocalAnalysis.simulations.filter(
+        (s) => s.coinId === selectedLocalAnalyzeCoinId
+      );
+      renderLocalAnalyzeList(simulations);
+    }
+  });
+
+  localAnalyzeDetail.querySelectorAll("img").forEach((img) => {
+    img.addEventListener("click", () => {
+      openLightbox(img.src, `${sim.coinName} · ${sim.signal}`);
+    });
+  });
+}
+
+function renderLocalAnalyzeList(simulations) {
+  if (!localAnalyzeList) return;
+
+  if (!simulations?.length) {
+    localAnalyzeList.innerHTML = `<p class="empty-state">No simulated trades — need a signal with up to 3 screenshots after it (stops early on TP/SL).</p>`;
+    return;
+  }
+
+  localAnalyzeList.innerHTML = simulations
+    .map((sim) => {
+      const r = sim.simulation || {};
+      return `
+        <article class="local-analyze-card" data-sim-id="${sim.id}">
+          <div class="trade-journal-thumb">
+            <img src="${sim.entrySet.screenshotUrl}?t=${encodeURIComponent(sim.entrySet.at)}" alt="" loading="lazy" />
+          </div>
+          <div class="trade-journal-body">
+            <div class="trade-journal-top">
+              <strong>${sim.coinName}</strong>
+              <span class="signal-badge signal-${sim.signal}">${(sim.signal || "").toUpperCase()}</span>
+              <span class="trade-status-badge ${outcomeClass(r.outcome)}">${outcomeLabel(r.outcome, r.exitStep)}</span>
+              <span class="${pnlClass(r.pnlUsdt)}">${formatUsd(r.pnlUsdt)}</span>
+            </div>
+            <p class="trade-journal-meta">${formatTime(sim.entrySet.at)} · entry ${r.entryPrice} → ${r.exitPrice}</p>
+            <p class="trade-journal-signal">TP ${r.tpPrice} · SL ${r.slPrice}${r.exitStep ? ` · closed @ +${r.exitStep} SS` : ""}</p>
+          </div>
+          <button type="button" class="btn btn-secondary btn-sm">Details</button>
+        </article>
+      `;
+    })
+    .join("");
+
+  localAnalyzeList.querySelectorAll(".local-analyze-card").forEach((card) => {
+    const open = () => {
+      const id = card.dataset.simId;
+      const sim = simulations.find((s) => s.id === id);
+      if (!sim) return;
+      selectedLocalSimId = id;
+      localAnalyzeList.classList.add("hidden");
+      localAnalyzeDetail.classList.remove("hidden");
+      renderLocalAnalyzeDetail(sim);
+    };
+    card.querySelector("button")?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      open();
+    });
+    card.addEventListener("click", open);
+  });
+}
+
+async function runLocalAnalyze() {
+  if (!localAnalyzeSummary) return;
+
+  const days = Number(localAnalyzeDays?.value) || 7;
+  const maxSets = Number(localAnalyzeMaxSets?.value) || 80;
+
+  localAnalyzeStatus.textContent = "Analyzing screenshots… this may take a minute.";
+  localAnalyzeSummary.innerHTML = "";
+  localAnalyzeCoinTable.innerHTML = "";
+  localAnalyzeListHeader?.classList.add("hidden");
+  localAnalyzeListHeader.innerHTML = "";
+  localAnalyzeList.innerHTML = "";
+  localAnalyzeDetail.classList.add("hidden");
+  localAnalyzeList.classList.remove("hidden");
+  selectedLocalAnalyzeCoinId = null;
+  selectedLocalSimId = null;
+  runLocalAnalyzeBtn.disabled = true;
+
+  try {
+    const res = await fetch(
+      `/api/local-trade-analysis?days=${days}&maxSets=${maxSets}`
+    );
+    const data = await parseJsonResponse(res);
+    if (!res.ok) throw new Error(data.error);
+
+    cachedLocalAnalysis = data.analysis;
+    localAnalyzeStatus.textContent = `Done · ${cachedLocalAnalysis.simulations?.length || 0} simulated trades from ${cachedLocalAnalysis.setsUsed} screenshot sets.`;
+    renderLocalAnalyzeSummary(cachedLocalAnalysis);
+    renderLocalAnalyzeCoinTable(cachedLocalAnalysis.perCoin, selectedLocalAnalyzeCoinId);
+    if (selectedLocalAnalyzeCoinId) {
+      viewLocalAnalyzeCoinReport(selectedLocalAnalyzeCoinId);
+    } else {
+      renderLocalAnalyzeListHeader(null);
+      localAnalyzeList.innerHTML = `<p class="field-hint local-analyze-prompt">Click <strong>View Report</strong> on a coin in the table above to see its paper trades below.</p>`;
+    }
+
+    if (selectedLocalSimId) {
+      const sim = cachedLocalAnalysis.simulations?.find((s) => s.id === selectedLocalSimId);
+      if (sim) {
+        localAnalyzeList.classList.add("hidden");
+        localAnalyzeDetail.classList.remove("hidden");
+        renderLocalAnalyzeDetail(sim);
+      }
+    }
+  } catch (err) {
+    localAnalyzeStatus.innerHTML = `<span class="text-error">${err.message || "Analysis failed."}</span>`;
+  } finally {
+    runLocalAnalyzeBtn.disabled = false;
+  }
 }
 
 function renderCompareView() {
@@ -1263,6 +2198,10 @@ clearCompareBtn.addEventListener("click", () => {
 });
 
 refreshSignalChartBtn?.addEventListener("click", loadSignalChart);
+pnlDaysSelect?.addEventListener("change", loadTradeJournal);
+tradeJournalFilter?.addEventListener("change", () => renderTradeJournalList(cachedTradeJournal));
+refreshTradeJournalBtn?.addEventListener("click", loadTradeJournal);
+runLocalAnalyzeBtn?.addEventListener("click", runLocalAnalyze);
 signalDaysSelect?.addEventListener("change", loadSignalChart);
 
 refreshBtn.addEventListener("click", async () => {
@@ -1416,6 +2355,10 @@ async function loadTvSession() {
 
 function fillBinanceSettings(settings) {
   settingsForm.autoTradeEnabled.checked = Boolean(settings.autoTradeEnabled);
+  if (settingsForm.autoTradeRequireGuidelines) {
+    settingsForm.autoTradeRequireGuidelines.checked =
+      settings.autoTradeRequireGuidelines !== false;
+  }
   settingsForm.binanceTestnet.checked = Boolean(settings.binanceTestnet);
   settingsForm.binanceApiKey.value = "";
   settingsForm.binanceApiSecret.value = "";
@@ -1470,7 +2413,9 @@ async function loadTradeLog() {
               const details =
                 t.status === "error"
                   ? `<span class="text-error">${t.error || "Failed"}</span>`
-                  : (t.actions || [])
+                  : t.status === "skipped"
+                    ? `<span class="text-muted">${t.reason || "Skipped"}</span>`
+                    : (t.actions || [])
                       .map((a) => {
                         if (a.action === "take_profit" || a.action === "stop_loss") {
                           return `${a.action} @ ${a.stopPrice} (${a.percent}%)`;
@@ -1483,7 +2428,7 @@ async function loadTradeLog() {
                   <td>${formatTime(t.at)}</td>
                   <td>${t.coinName || t.coinId}<div class="card-symbol">${t.symbol || ""}</div></td>
                   <td class="signal-cell-${t.signal || "none"}">${(t.signal || "—").toUpperCase()}</td>
-                  <td>${t.status === "ok" ? "OK" : t.status === "error" ? "Error" : t.status || "—"}</td>
+                  <td>${t.status === "ok" ? "OK" : t.status === "error" ? "Error" : t.status === "skipped" ? "Blocked" : t.status || "—"}</td>
                   <td>${details}</td>
                 </tr>
               `;
@@ -1507,6 +2452,8 @@ async function loadSettingsForm() {
     settingsForm.chartInterval.value = settings.chartInterval || "15";
     settingsForm.alertThresholdPercent.value = settings.alertThresholdPercent ?? 3;
     settingsForm.historyPerPage.value = settings.historyPerPage ?? 10;
+    settingsForm.screenshotWaitSeconds.value = settings.screenshotWaitSeconds ?? 5;
+    settingsForm.chartLoadMaxRetries.value = settings.chartLoadMaxRetries ?? 6;
     fillBinanceSettings(settings);
     showSettingsMessage("", "");
     await loadTvSession();
@@ -1599,7 +2546,10 @@ settingsForm.addEventListener("submit", async (e) => {
     chartInterval: form.get("chartInterval"),
     alertThresholdPercent: Number(form.get("alertThresholdPercent")),
     historyPerPage: Number(form.get("historyPerPage")),
+    screenshotWaitSeconds: Number(form.get("screenshotWaitSeconds")),
+    chartLoadMaxRetries: Number(form.get("chartLoadMaxRetries")),
     autoTradeEnabled: settingsForm.autoTradeEnabled.checked,
+    autoTradeRequireGuidelines: settingsForm.autoTradeRequireGuidelines?.checked !== false,
     binanceTestnet: settingsForm.binanceTestnet.checked,
     tradeAmountUsdt: Number(form.get("tradeAmountUsdt")),
     tradeLeverage: Number(form.get("tradeLeverage")),

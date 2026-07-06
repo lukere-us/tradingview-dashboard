@@ -26,7 +26,7 @@ function makeSetId(date = new Date()) {
   return date.toISOString().replace(/[:.]/g, "-");
 }
 
-async function archiveScreenshotSet({ trigger, coins, results }) {
+async function archiveScreenshotSet({ trigger, coins, results, prices = null }) {
   const setId = makeSetId();
   const setDir = path.join(HISTORY_DIR, setId);
   await fs.mkdir(setDir, { recursive: true });
@@ -52,6 +52,7 @@ async function archiveScreenshotSet({ trigger, coins, results }) {
     coins: coins.map((c) => ({ id: c.id, name: c.name, symbol: c.symbol })),
     results,
     images: archived,
+    prices: prices || null,
   };
 
   const metaPath = path.join(setDir, "meta.json");
@@ -77,6 +78,29 @@ async function getSet(setId) {
   return entry;
 }
 
+async function patchSetMeta(setId, patch) {
+  const metaPath = path.join(HISTORY_DIR, setId, "meta.json");
+  let meta;
+  try {
+    const raw = await fs.readFile(metaPath, "utf8");
+    meta = JSON.parse(raw);
+  } catch {
+    throw new Error(`Screenshot set meta "${setId}" not found`);
+  }
+
+  const next = { ...meta, ...patch };
+  await fs.writeFile(metaPath, JSON.stringify(next, null, 2));
+
+  const index = await loadHistoryIndex();
+  const idx = index.findIndex((s) => s.id === setId);
+  if (idx >= 0) {
+    index[idx] = { ...index[idx], ...patch };
+    await saveHistoryIndex(index);
+  }
+
+  return next;
+}
+
 module.exports = {
   CURRENT_DIR,
   HISTORY_DIR,
@@ -84,4 +108,5 @@ module.exports = {
   archiveScreenshotSet,
   listSets,
   getSet,
+  patchSetMeta,
 };
