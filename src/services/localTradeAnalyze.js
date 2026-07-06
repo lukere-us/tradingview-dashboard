@@ -1,7 +1,7 @@
 const fs = require("fs/promises");
 const path = require("path");
 const { listSets, HISTORY_DIR } = require("./historyStore");
-const { buildTradeAnalysis } = require("./tradeGuidelines");
+const { buildTradeAnalysis, checkTradeGuidelines } = require("./tradeGuidelines");
 const { loadHistory } = require("./signalHistoryStore");
 const { getCoins } = require("./coinsStore");
 const { getSettings } = require("./settingsStore");
@@ -9,13 +9,46 @@ const { futuresSymbol } = require("./binanceTrade");
 
 const FORWARD_CAPTURES = 3;
 const HOLD_CAPTURES = 2;
-/** Paper trades: do not block on Future Trend Pro checklist. */
-const ASSUME_GUIDELINES_PASS = true;
 
 function round2(n) {
   const v = Number(n);
   if (!Number.isFinite(v)) return 0;
   return Math.round(v * 100) / 100;
+}
+
+/** Win rate from TP/SL hits; open trades use mark-to-market P&L sign. */
+function tallySimulationResults(simulations) {
+  let wins = 0;
+  let losses = 0;
+  let openAfter3 = 0;
+
+  for (const item of simulations) {
+    const outcome = item.simulation?.outcome;
+    const pnl = Number(item.simulation?.pnlUsdt);
+    const hasPnl = Number.isFinite(pnl);
+
+    if (outcome === "win_tp") {
+      wins++;
+    } else if (outcome === "loss_sl") {
+      losses++;
+    } else if (outcome === "after_3" || outcome === "open") {
+      if (hasPnl && pnl > 0) wins++;
+      else if (hasPnl && pnl < 0) losses++;
+      else openAfter3++;
+    } else if (hasPnl && pnl > 0) {
+      wins++;
+    } else if (hasPnl && pnl < 0) {
+      losses++;
+    }
+  }
+
+  return {
+    wins,
+    losses,
+    openAfter3,
+    winRate:
+      wins + losses > 0 ? round2((wins / (wins + losses)) * 100) : null,
+  };
 }
 
 function sortSetsChronological(sets) {
@@ -305,27 +338,20 @@ function summarizeTodayPnl(simulations) {
     (s) => s.entrySet?.at && entryLocalDayKey(s.entrySet.at) === today
   );
 
-  let wins = 0;
-  let losses = 0;
-  let openAfter3 = 0;
   let totalPnl = 0;
-
   for (const sim of todaySims) {
-    const outcome = sim.simulation?.outcome;
     totalPnl += sim.simulation?.pnlUsdt || 0;
-    if (outcome === "win_tp") wins++;
-    else if (outcome === "loss_sl") losses++;
-    else if (outcome === "after_3") openAfter3++;
   }
+
+  const tally = tallySimulationResults(todaySims);
 
   return {
     simulated: todaySims.length,
-    wins,
-    losses,
-    openAfter3,
+    wins: tally.wins,
+    losses: tally.losses,
+    openAfter3: tally.openAfter3,
     totalPnl: round2(totalPnl),
-    winRate:
-      wins + losses > 0 ? round2((wins / (wins + losses)) * 100) : null,
+    winRate: tally.winRate,
   };
 }
 
@@ -338,9 +364,6 @@ async function analyzeCoinAcrossHistory(coin, sets, settings, options = {}) {
   let signalsDetected = 0;
   let guidelinesPassed = 0;
   let simulated = 0;
-  let wins = 0;
-  let losses = 0;
-  let openAfter3 = 0;
   let totalPnl = 0;
   const legacyEvents = await loadHistory();
   const countedLegacyKeys = new Set();
@@ -368,9 +391,17 @@ async function analyzeCoinAcrossHistory(coin, sets, settings, options = {}) {
 
     if (!captured.isNewSignal) continue;
     signalsDetected++;
-    guidelinesPassed++;
 
     const { signal, chartResult } = captured;
+
+    const guide = await checkTradeGuidelines({
+      coinId: coin.id,
+      signal,
+      settings,
+      imagePath,
+    });
+    if (!guide.ok) continue;
+    guidelinesPassed++;
 
     if (
       lastSignal === signal &&
@@ -417,10 +448,6 @@ async function analyzeCoinAcrossHistory(coin, sets, settings, options = {}) {
     simulated++;
     totalPnl += sim.pnlUsdt || 0;
 
-    if (sim.outcome === "win_tp") wins++;
-    else if (sim.outcome === "loss_sl") losses++;
-    else if (sim.outcome === "after_3") openAfter3++;
-
     lastEntryCaptureIdx = i;
     lastSignal = signal;
 
@@ -428,10 +455,9 @@ async function analyzeCoinAcrossHistory(coin, sets, settings, options = {}) {
       coinId: coin.id,
       signal,
       chartResult,
-      guide: { ok: true, failures: [], assumed: ASSUME_GUIDELINES_PASS },
+      guide,
       settings,
     });
-    analysis.guidelinesAssumed = ASSUME_GUIDELINES_PASS;
     analysis.screenshotUrl = `/screenshots/history/${set.id}/${coin.id}.png`;
 
     simulations.push({
@@ -452,6 +478,8 @@ async function analyzeCoinAcrossHistory(coin, sets, settings, options = {}) {
     });
   }
 
+  const tally = tallySimulationResults(simulations);
+
   return {
     coinId: coin.id,
     coinName: coin.name,
@@ -460,10 +488,10 @@ async function analyzeCoinAcrossHistory(coin, sets, settings, options = {}) {
       signalsDetected,
       guidelinesPassed,
       simulated,
-      wins,
-      losses,
-      openAfter3,
-      winRate: wins + losses > 0 ? round2((wins / (wins + losses)) * 100) : null,
+      wins: tally.wins,
+      losses: tally.losses,
+      openAfter3: tally.openAfter3,
+      winRate: tally.winRate,
       totalPnl: round2(totalPnl),
     },
     simulations,
@@ -509,21 +537,20 @@ async function runLocalTradeAnalysis(options = {}) {
     totals.signalsDetected += row.counts.signalsDetected;
     totals.guidelinesPassed += row.counts.guidelinesPassed;
     totals.simulated += row.counts.simulated;
-    totals.wins += row.counts.wins;
-    totals.losses += row.counts.losses;
-    totals.openAfter3 += row.counts.openAfter3;
     totals.totalPnl += row.counts.totalPnl;
   }
 
   totals.totalPnl = round2(totals.totalPnl);
-  totals.winRate =
-    totals.wins + totals.losses > 0
-      ? round2((totals.wins / (totals.wins + totals.losses)) * 100)
-      : null;
 
   const allSimulations = perCoin
     .flatMap((c) => c.simulations)
     .sort((a, b) => new Date(b.entrySet.at) - new Date(a.entrySet.at));
+
+  const simTally = tallySimulationResults(allSimulations);
+  totals.wins = simTally.wins;
+  totals.losses = simTally.losses;
+  totals.openAfter3 = simTally.openAfter3;
+  totals.winRate = simTally.winRate;
 
   let todayTotals;
   if (days <= 1) {

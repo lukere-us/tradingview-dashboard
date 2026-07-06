@@ -941,6 +941,139 @@ body {
   white-space: nowrap;
 }
 
+.signal-col-clickable {
+  cursor: pointer;
+}
+
+.signal-col-clickable:hover {
+  filter: brightness(1.15);
+  outline: 2px solid rgba(255, 255, 255, 0.35);
+  outline-offset: 1px;
+}
+
+.signal-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+}
+
+.signal-modal.hidden {
+  display: none;
+}
+
+.signal-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.72);
+}
+
+.signal-modal-panel {
+  position: relative;
+  width: 90%;
+  max-width: 1200px;
+  max-height: min(90vh, 900px);
+  background: #1a1d26;
+  border: 1px solid #2a2e39;
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.45);
+}
+
+.signal-modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid #2a2e39;
+}
+
+.signal-modal-header h3 {
+  margin: 0;
+  font-size: 1.15rem;
+}
+
+.signal-modal-close {
+  background: transparent;
+  border: none;
+  color: #9aa0a6;
+  font-size: 1.5rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0.15rem 0.35rem;
+}
+
+.signal-modal-close:hover {
+  color: #e8eaed;
+}
+
+.signal-modal-body {
+  padding: 1rem 1.25rem 1.25rem;
+  overflow-y: auto;
+}
+
+.signal-accordion {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.signal-accordion-item {
+  border: 1px solid #2a2e39;
+  border-radius: 10px;
+  background: #13151c;
+  overflow: hidden;
+}
+
+.signal-accordion-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+  padding: 0.85rem 1rem;
+  cursor: pointer;
+  list-style: none;
+}
+
+.signal-accordion-summary::-webkit-details-marker {
+  display: none;
+}
+
+.signal-accordion-summary::before {
+  content: "▸";
+  color: #9aa0a6;
+  margin-right: 0.15rem;
+  transition: transform 0.15s ease;
+}
+
+.signal-accordion-item[open] .signal-accordion-summary::before {
+  transform: rotate(90deg);
+}
+
+.signal-accordion-time {
+  font-size: 0.9rem;
+  color: #e8eaed;
+}
+
+.signal-accordion-body {
+  padding: 0 1rem 1rem;
+  border-top: 1px solid #2a2e39;
+}
+
+.signal-accordion-body .trade-detail-grid {
+  margin-top: 1rem;
+}
+
+.signal-detail-img img {
+  cursor: zoom-in;
+}
+
 .signal-col-name {
   height: 1.75rem;
   display: flex;
@@ -1250,7 +1383,9 @@ body {
 }
 
 /* Trade Journal */
-.trade-journal-summary {
+.trade-journal-pagination {
+  margin-bottom: 1rem;
+}
   margin-bottom: 1rem;
 }
 

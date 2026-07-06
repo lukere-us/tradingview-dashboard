@@ -174,6 +174,7 @@
               <label class="inline-label">
                 Period
                 <select id="pnlDaysSelect">
+                  <option value="1">Today</option>
                   <option value="7">7 days</option>
                   <option value="30" selected>30 days</option>
                   <option value="90">90 days</option>
@@ -194,6 +195,7 @@
           <section id="pnlReportSection" class="pnl-report-section"></section>
           <section id="tradeJournalSummary" class="meta trade-journal-summary"></section>
           <div id="tradeJournalList" class="trade-journal-list"></div>
+          <nav id="tradeJournalPagination" class="history-pagination trade-journal-pagination hidden" aria-label="Trade journal pagination"></nav>
           <div id="tradeJournalDetail" class="trade-journal-detail hidden"></div>
         </section>
 
@@ -535,6 +537,20 @@
           <img id="lightboxImg" src="" alt="" />
         </div>
         <p id="lightboxCaption" class="lightbox-caption"></p>
+      </div>
+    </div>
+
+    <div id="signalChartModal" class="signal-modal hidden" role="dialog" aria-modal="true" aria-labelledby="signalModalTitle">
+      <div class="signal-modal-backdrop" data-close-signal-modal></div>
+      <div class="signal-modal-panel">
+        <header class="signal-modal-header">
+          <div>
+            <h3 id="signalModalTitle">Signals</h3>
+            <p id="signalModalSubtitle" class="field-hint"></p>
+          </div>
+          <button type="button" class="signal-modal-close" data-close-signal-modal aria-label="Close">×</button>
+        </header>
+        <div id="signalModalBody" class="signal-modal-body"></div>
       </div>
     </div>
 

@@ -1,4 +1,5 @@
 const crypto = require("crypto");
+const { enrichTradeJournalEntry } = require("./tradeGuidelines");
 const fs = require("fs/promises");
 const path = require("path");
 
@@ -506,12 +507,13 @@ async function testBinanceConnection(settings) {
 
 async function listTrades(limit = 50) {
   const log = await loadTradeLog();
-  return log.slice(0, limit);
+  return log.slice(0, limit).map(enrichTradeJournalEntry);
 }
 
 async function getTradeById(id) {
   const log = await loadTradeLog();
-  return log.find((t) => t.id === id) || null;
+  const trade = log.find((t) => t.id === id) || null;
+  return trade ? enrichTradeJournalEntry(trade) : null;
 }
 
 module.exports = {

@@ -27,6 +27,67 @@ const ROW_LABELS = {
   emaCloud: "EMA Cloud",
 };
 
+/** Minimum checklist completion to treat guidelines as passed. */
+const GUIDELINE_PASS_PERCENT = 70;
+
+function checklistPassStats(checklist) {
+  const items = Array.isArray(checklist) ? checklist : [];
+  const total = items.length;
+  const passed = items.filter((i) => i.passed).length;
+  const percent = total > 0 ? Math.round((passed / total) * 1000) / 10 : 0;
+
+  return {
+    passed,
+    total,
+    percent,
+    ok: total > 0 && percent >= GUIDELINE_PASS_PERCENT,
+  };
+}
+
+/** Recompute pass stats from saved trade/analysis checklist (core rows only). */
+function guidelineStatsFromAnalysis(analysis) {
+  if (!analysis) {
+    return { passed: 0, total: 0, percent: null, ok: false };
+  }
+
+  if (analysis.guidelinePassStats) {
+    return analysis.guidelinePassStats;
+  }
+
+  const full = Array.isArray(analysis.checklist) ? analysis.checklist : [];
+  const core = full.filter((i) => i.key !== "signal");
+  const checklist = core.length > 0 ? core : full;
+
+  if (!checklist.length) {
+    const percent = analysis.guidelinePassPercent ?? null;
+    return {
+      passed: 0,
+      total: 0,
+      percent,
+      ok:
+        percent != null
+          ? percent >= GUIDELINE_PASS_PERCENT
+          : Boolean(analysis.guidelinesPassed),
+    };
+  }
+
+  return checklistPassStats(checklist);
+}
+
+function enrichTradeJournalEntry(trade) {
+  if (!trade?.analysis) return trade;
+  const passStats = guidelineStatsFromAnalysis(trade.analysis);
+  return {
+    ...trade,
+    analysis: {
+      ...trade.analysis,
+      guidelinePassPercent: passStats.percent,
+      guidelinesPassed: passStats.ok,
+      guidelinePassStats: passStats,
+    },
+  };
+}
+
 /** Future Trend Pro [15m] trading guide — checklist before entry. */
 const BUY_REQUIREMENTS = {
   bias: { value: "green", label: "Bias must be BULLISH (not NEUTRAL)" },
@@ -208,7 +269,9 @@ function validateTradeGuidelines(signal, tableResult, settings = {}) {
   }
 
   if (settings.autoTradeRequireGuidelines === false) {
-    return { ok: true, failures: [], status, skippedCheck: true };
+    const checklist = buildChecklist(signal, tableResult, settings);
+    const passStats = checklistPassStats(checklist);
+    return { ok: true, failures: [], status, skippedCheck: true, checklist, passStats };
   }
 
   if (!isFifteenMinuteChart(settings)) {
@@ -217,7 +280,9 @@ function validateTradeGuidelines(signal, tableResult, settings = {}) {
 
   if (!tableResult?.found) {
     failures.push("Status table not detected on screenshot");
-    return { ok: false, failures, status };
+    const checklist = buildChecklist(signal, tableResult, settings);
+    const passStats = checklistPassStats(checklist);
+    return { ok: passStats.ok, failures, status, checklist, passStats };
   }
 
   if (rows.bias === "gray" || rows.bias === "unknown") {
@@ -252,10 +317,15 @@ function validateTradeGuidelines(signal, tableResult, settings = {}) {
     }
   }
 
+  const checklist = buildChecklist(signal, tableResult, settings);
+  const passStats = checklistPassStats(checklist);
+
   return {
-    ok: failures.length === 0,
+    ok: passStats.ok,
     failures,
     status,
+    checklist,
+    passStats,
   };
 }
 
@@ -270,7 +340,6 @@ async function checkTradeGuidelines({ coinId, signal, settings, imagePath }) {
   return {
     ...validation,
     tableResult,
-    checklist: buildChecklist(signal, tableResult, settings),
   };
 }
 
@@ -373,6 +442,7 @@ function buildTradeAnalysis({
     },
     screenshotUrl: `/screenshots/current/${coinId}.png`,
     guidelinesPassed: Boolean(guide?.ok),
+    guidelinePassPercent: guide?.passStats?.percent ?? null,
     guidelineFailures: guide?.failures || [],
     tableFound: Boolean(guide?.tableResult?.found),
     tableStatus: guide?.tableResult?.rows || null,
@@ -401,6 +471,9 @@ module.exports = {
   validateTradeGuidelines,
   checkTradeGuidelines,
   buildChecklist,
+  checklistPassStats,
+  guidelineStatsFromAnalysis,
+  enrichTradeJournalEntry,
   buildTradeAnalysis,
   statusDisplay,
   TABLE_SEARCH,
@@ -408,4 +481,5 @@ module.exports = {
   ROW_LABELS,
   BUY_REQUIREMENTS,
   SELL_REQUIREMENTS,
+  GUIDELINE_PASS_PERCENT,
 };

@@ -99,6 +99,7 @@ async function updateSignalsForCoins(coinIds, onProgress, options = {}) {
       analyzedAt: result.analyzedAt,
       isNewSignal: Boolean(event),
       guidelinesOk: guide ? guide.ok : null,
+      guidelinePassPercent: guide?.passStats?.percent ?? null,
       guidelineFailures: guide?.failures || [],
     };
 

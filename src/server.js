@@ -28,7 +28,7 @@ const {
 const { getAlerts, refreshPrices, loadPriceStore } = require("./services/priceAlerts");
 const { runLocalTradeAnalysis } = require("./services/localTradeAnalyze");
 const { getSignals, updateSignalsForCoins } = require("./services/signalsStore");
-const { getSignalStats } = require("./services/signalHistoryStore");
+const { getSignalStats, getSignalBarDetails } = require("./services/signalHistoryStore");
 
 function emptySignalAnalysis() {
   return {
@@ -323,7 +323,7 @@ app.post("/api/binance/test", async (_req, res) => {
 
 app.get("/api/trades", async (req, res) => {
   try {
-    const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
+    const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 50));
     const trades = await listTrades(limit);
     res.json({ trades });
   } catch (err) {
@@ -377,6 +377,7 @@ app.get("/api/signal-stats", async (req, res) => {
     res.json({
       days: stats.days,
       totals: stats.totals,
+      guidelinePassPercent: stats.guidelinePassPercent ?? 70,
       coins: stats.coins.map((row) => ({
         ...row,
         name: coinMap[row.coinId]?.name || row.coinId,
@@ -384,6 +385,23 @@ app.get("/api/signal-stats", async (req, res) => {
         group: coinMap[row.coinId]?.group || "",
       })),
     });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/signal-details", async (req, res) => {
+  try {
+    const coinId = String(req.query.coinId || "").trim();
+    const kind = String(req.query.kind || "").trim();
+    const days = Math.min(30, Math.max(1, Number(req.query.days) || 1));
+
+    if (!coinId || !kind) {
+      return res.status(400).json({ error: "coinId and kind are required" });
+    }
+
+    const result = await getSignalBarDetails({ coinId, kind, days });
+    res.json({ detail: result });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

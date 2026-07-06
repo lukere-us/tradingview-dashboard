@@ -52,6 +52,17 @@ const refreshSignalChartBtn = document.getElementById("refreshSignalChartBtn");
 const signalChartSummary = document.getElementById("signalChartSummary");
 const signalChartBars = document.getElementById("signalChartBars");
 const signalChartTable = document.getElementById("signalChartTable");
+const signalChartModal = document.getElementById("signalChartModal");
+const signalModalTitle = document.getElementById("signalModalTitle");
+const signalModalSubtitle = document.getElementById("signalModalSubtitle");
+const signalModalBody = document.getElementById("signalModalBody");
+
+const SIGNAL_KIND_LABELS = {
+  buy: "Buy signals",
+  passedBuy: "Passed buy",
+  sell: "Sell signals",
+  passedSell: "Passed sell",
+};
 
 const tradeJournalFilter = document.getElementById("tradeJournalFilter");
 const pnlDaysSelect = document.getElementById("pnlDaysSelect");
@@ -59,11 +70,14 @@ const pnlReportSection = document.getElementById("pnlReportSection");
 const refreshTradeJournalBtn = document.getElementById("refreshTradeJournalBtn");
 const tradeJournalSummary = document.getElementById("tradeJournalSummary");
 const tradeJournalList = document.getElementById("tradeJournalList");
+const tradeJournalPagination = document.getElementById("tradeJournalPagination");
 const tradeJournalDetail = document.getElementById("tradeJournalDetail");
 
 let cachedTradeJournal = [];
 let cachedPnLReport = null;
 let selectedTradeId = null;
+let tradeJournalPage = 1;
+const TRADE_JOURNAL_PER_PAGE = 10;
 
 const localAnalyzeDays = document.getElementById("localAnalyzeDays");
 const runLocalAnalyzeBtn = document.getElementById("runLocalAnalyzeBtn");
@@ -648,6 +662,186 @@ function signalChartYMax(coins) {
   return Math.ceil(peak / 2) * 2;
 }
 
+function renderGuidelineAnalysisBody(entry) {
+  const analysis = entry.analysis || {};
+  const chart = analysis.chartSignal || {};
+  const settings = analysis.tradeSettings || {};
+  const screenshot =
+    entry.screenshotUrl || analysis.screenshotUrl || `/screenshots/current/${entry.coinId}.png`;
+
+  if (!analysis.checklist?.length) {
+    return `<p class="empty-state">No screenshot checklist available for this signal.</p>`;
+  }
+
+  const pos = chart.position ? ` (${chart.position})` : "";
+
+  return `
+    <div class="trade-detail-grid">
+      <div class="trade-detail-chart">
+        <h4>Chart at signal time</h4>
+        <div class="trade-detail-image-wrap signal-detail-img ${chart.highlight ? `signal-${chart.highlight}` : ""}">
+          <img src="${screenshot}?t=${encodeURIComponent(entry.at)}" alt="${entry.coinName || entry.coinId} chart" />
+        </div>
+        <p class="field-hint">
+          Image signal: <strong>${(chart.signal || "none").toUpperCase()}${pos}</strong>
+          ${chart.analyzedAt ? ` · analyzed ${formatTime(chart.analyzedAt)}` : ""}
+        </p>
+      </div>
+      <div class="trade-detail-checklist">
+        <h4>Future Trend Pro checklist</h4>
+        <p class="field-hint">${analysis.guideSummary || "Future Trend Pro checklist — pass at ≥70%."}</p>
+        ${renderChecklistTable(analysis.checklist)}
+        ${
+          analysis.guidelineFailures?.length && !analysis.guidelinesPassed
+            ? `<div class="trade-block-reasons"><strong>Below 70% threshold:</strong><ul>${analysis.guidelineFailures.map((f) => `<li>${f}</li>`).join("")}</ul></div>`
+            : analysis.guidelinesPassed
+              ? `<p class="field-hint ok">Guidelines passed${analysis.guidelinePassPercent != null ? ` (${analysis.guidelinePassPercent}% complete)` : ""} — ≥70% required.</p>`
+              : analysis.guidelinePassPercent != null
+                ? `<p class="field-hint">Checklist ${analysis.guidelinePassPercent}% complete — need ≥70% to pass.</p>`
+                : ""
+        }
+      </div>
+    </div>
+    <div class="trade-detail-panels">
+      <div class="trade-detail-panel">
+        <h4>Trade settings</h4>
+        <ul class="trade-meta-list">
+          <li>Amount: <strong>${settings.tradeAmountUsdt ?? "—"} USDT</strong></li>
+          <li>Leverage: <strong>${settings.tradeLeverage ?? "—"}x</strong></li>
+          <li>Mode: <strong>${settings.tradeMode ?? "—"}</strong></li>
+          <li>Margin: <strong>${settings.tradeMarginType ?? "—"}</strong></li>
+          <li>TP / SL: <strong>${settings.tradeTpPercent ?? "—"}% / ${settings.tradeSlPercent ?? "—"}%</strong></li>
+          <li>Interval: <strong>${settings.chartInterval || "15"}m</strong></li>
+          <li>Network: <strong>${settings.testnet ? "Testnet" : "Live"}</strong></li>
+        </ul>
+      </div>
+    </div>
+  `;
+}
+
+function bindSignalDetailImages(root, entry) {
+  root?.querySelectorAll(".signal-detail-img img").forEach((img) => {
+    img.addEventListener("click", () => {
+      openLightbox(
+        img.src,
+        `${entry.coinName || entry.coinId} · ${(entry.signal || "").toUpperCase()}`
+      );
+    });
+  });
+}
+
+function signalBarClass(kind) {
+  if (kind === "buy") return "signal-col buy";
+  if (kind === "passedBuy") return "signal-col passed buy";
+  if (kind === "sell") return "signal-col sell";
+  if (kind === "passedSell") return "signal-col passed sell";
+  return "signal-col";
+}
+
+function signalBarClickAttrs(coin, kind, count) {
+  const baseClass = signalBarClass(kind);
+  if (!count) return `class="${baseClass}"`;
+  return `class="${baseClass} signal-col-clickable" role="button" tabindex="0" data-coin-id="${coin.coinId}" data-coin-name="${coin.name}" data-signal-kind="${kind}" data-signal-count="${count}"`;
+}
+
+function closeSignalChartModal() {
+  signalChartModal?.classList.add("hidden");
+  document.body.style.overflow = "";
+  if (signalModalBody) signalModalBody.innerHTML = "";
+}
+
+async function openSignalChartModal({ coinId, coinName, kind, days }) {
+  if (!signalChartModal || !signalModalBody) return;
+
+  const kindLabel = SIGNAL_KIND_LABELS[kind] || kind;
+  signalModalTitle.textContent = `${coinName} · ${kindLabel}`;
+  signalModalSubtitle.textContent = "Loading signals…";
+  signalModalBody.innerHTML = `<p class="field-hint">Loading signal details…</p>`;
+  signalChartModal.classList.remove("hidden");
+  document.body.style.overflow = "hidden";
+
+  try {
+    const res = await fetch(
+      `/api/signal-details?coinId=${encodeURIComponent(coinId)}&kind=${encodeURIComponent(kind)}&days=${encodeURIComponent(days)}`
+    );
+    const data = await parseJsonResponse(res);
+    if (!res.ok) throw new Error(data.error);
+
+    const detail = data.detail || {};
+    const signals = detail.signals || [];
+    signalModalSubtitle.textContent = `${signals.length} signal${signals.length === 1 ? "" : "s"} in selected period · click each row to expand`;
+
+    if (!signals.length) {
+      signalModalBody.innerHTML = `<p class="empty-state">No signals in this bar for the selected period.</p>`;
+      return;
+    }
+
+    signalModalBody.innerHTML = `
+      <div class="signal-accordion">
+        ${signals
+          .map((entry, index) => {
+            const passLabel =
+              entry.guidelinePassPercent != null
+                ? `${entry.guidelinePassPercent}%`
+                : entry.guidelinesOk
+                  ? "passed"
+                  : entry.guidelinesOk === false
+                    ? "below 70%"
+                    : "—";
+            const statusClass = entry.guidelinesOk
+              ? "trade-status-ok"
+              : entry.guidelinesOk === false
+                ? "trade-status-blocked"
+                : "";
+            return `
+          <details class="signal-accordion-item" ${index === 0 ? "open" : ""}>
+            <summary class="signal-accordion-summary">
+              <span class="signal-badge signal-${entry.signal || "none"}">${(entry.signal || "—").toUpperCase()}</span>
+              <span class="signal-accordion-time">${formatTime(entry.at)}</span>
+              <span class="trade-status-badge ${statusClass}">${passLabel}</span>
+              ${entry.position ? `<span class="field-hint">${entry.position}</span>` : ""}
+            </summary>
+            <div class="signal-accordion-body">
+              ${renderGuidelineAnalysisBody(entry)}
+            </div>
+          </details>
+        `;
+          })
+          .join("")}
+      </div>
+    `;
+
+    signalModalBody.querySelectorAll(".signal-accordion-item").forEach((item, index) => {
+      bindSignalDetailImages(item, signals[index]);
+    });
+  } catch (err) {
+    signalModalSubtitle.textContent = "";
+    signalModalBody.innerHTML = `<p class="text-error">${err.message || "Failed to load signal details."}</p>`;
+  }
+}
+
+function bindSignalChartBarClicks(days) {
+  signalChartBars?.querySelectorAll("[data-signal-kind]").forEach((bar) => {
+    const open = () => {
+      const count = Number(bar.dataset.signalCount) || 0;
+      if (count <= 0) return;
+      openSignalChartModal({
+        coinId: bar.dataset.coinId,
+        coinName: bar.dataset.coinName,
+        kind: bar.dataset.signalKind,
+        days,
+      });
+    };
+    bar.addEventListener("click", open);
+    bar.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        open();
+      }
+    });
+  });
+}
+
 function renderSignalColumnChart(coins) {
   const yMax = signalChartYMax(coins);
   const ticks = [];
@@ -662,36 +856,40 @@ function renderSignalColumnChart(coins) {
       const sellH = yMax > 0 ? (coin.totals.sell / yMax) * 100 : 0;
       const passedBuyH = yMax > 0 ? ((coin.totals.passedBuy || 0) / yMax) * 100 : 0;
       const passedSellH = yMax > 0 ? ((coin.totals.passedSell || 0) / yMax) * 100 : 0;
+      const buyCount = coin.totals.buy || 0;
+      const sellCount = coin.totals.sell || 0;
+      const passedBuyCount = coin.totals.passedBuy || 0;
+      const passedSellCount = coin.totals.passedSell || 0;
       return `
         <div class="signal-col-group">
           <div class="signal-col-bars">
             <div
-              class="signal-col buy"
+              ${signalBarClickAttrs(coin, "buy", buyCount)}
               style="height:${buyH}%"
-              title="${coin.name}: ${coin.totals.buy} buy"
+              title="${coin.name}: ${buyCount} buy — click for details"
             >
-              <span class="signal-col-value">${coin.totals.buy}</span>
+              <span class="signal-col-value">${buyCount}</span>
             </div>
             <div
-              class="signal-col passed buy"
+              ${signalBarClickAttrs(coin, "passedBuy", passedBuyCount)}
               style="height:${passedBuyH}%"
-              title="${coin.name}: ${coin.totals.passedBuy || 0} passed buy"
+              title="${coin.name}: ${passedBuyCount} passed buy — click for details"
             >
-              <span class="signal-col-value">${coin.totals.passedBuy || 0}</span>
+              <span class="signal-col-value">${passedBuyCount}</span>
             </div>
             <div
-              class="signal-col sell"
+              ${signalBarClickAttrs(coin, "sell", sellCount)}
               style="height:${sellH}%"
-              title="${coin.name}: ${coin.totals.sell} sell"
+              title="${coin.name}: ${sellCount} sell — click for details"
             >
-              <span class="signal-col-value">${coin.totals.sell}</span>
+              <span class="signal-col-value">${sellCount}</span>
             </div>
             <div
-              class="signal-col passed sell"
+              ${signalBarClickAttrs(coin, "passedSell", passedSellCount)}
               style="height:${passedSellH}%"
-              title="${coin.name}: ${coin.totals.passedSell || 0} passed sell"
+              title="${coin.name}: ${passedSellCount} passed sell — click for details"
             >
-              <span class="signal-col-value">${coin.totals.passedSell || 0}</span>
+              <span class="signal-col-value">${passedSellCount}</span>
             </div>
           </div>
           <div class="signal-col-name">${coin.name}</div>
@@ -731,14 +929,16 @@ function renderSignalChart(data) {
     days = [],
     coins = [],
     totals = { buy: 0, sell: 0, passedBuy: 0, passedSell: 0 },
+    guidelinePassPercent = 70,
   } = data;
 
   signalChartSummary.innerHTML = `
     <p><strong>Buy signals:</strong> <span class="signal-total buy">${totals.buy}</span>
-      · <strong>Passed:</strong> <span class="signal-total passed buy">${totals.passedBuy || 0}</span></p>
+      · <strong>Passed (≥${guidelinePassPercent}%):</strong> <span class="signal-total passed buy">${totals.passedBuy || 0}</span></p>
     <p><strong>Sell signals:</strong> <span class="signal-total sell">${totals.sell}</span>
-      · <strong>Passed:</strong> <span class="signal-total passed sell">${totals.passedSell || 0}</span></p>
+      · <strong>Passed (≥${guidelinePassPercent}%):</strong> <span class="signal-total passed sell">${totals.passedSell || 0}</span></p>
     <p><strong>Range:</strong> ${days[0] || "—"} → ${days[days.length - 1] || "—"}</p>
+    <p class="field-hint">Click a chart bar to open each signal with screenshot and Future Trend Pro checklist (same layout as Trade Journal).</p>
   `;
 
   if (coins.length === 0) {
@@ -748,6 +948,7 @@ function renderSignalChart(data) {
   }
 
   signalChartBars.innerHTML = renderSignalColumnChart(coins);
+  bindSignalChartBarClicks(Number(signalDaysSelect?.value) || 1);
 
   const dayHeaders = days.map((d) => `<th>${formatDayLabel(d)}</th>`).join("");
 
@@ -880,10 +1081,7 @@ function renderTradeActions(actions) {
 function renderTradeJournalDetail(trade) {
   const analysis = trade.analysis || {};
   const chart = analysis.chartSignal || {};
-  const settings = analysis.tradeSettings || {};
-  const screenshot = analysis.screenshotUrl || `/screenshots/current/${trade.coinId}.png`;
   const signalLabel = (trade.signal || "—").toUpperCase();
-  const pos = chart.position ? ` (${chart.position})` : "";
 
   tradeJournalDetail.innerHTML = `
     <div class="trade-detail-header">
@@ -895,45 +1093,9 @@ function renderTradeJournalDetail(trade) {
       <p class="field-hint">${formatTime(trade.at)} · ${trade.symbol || ""}</p>
     </div>
 
-    <div class="trade-detail-grid">
-      <div class="trade-detail-chart">
-        <h4>Chart at decision time</h4>
-        <div class="trade-detail-image-wrap ${chart.highlight ? `signal-${chart.highlight}` : ""}">
-          <img src="${screenshot}?t=${encodeURIComponent(trade.at)}" alt="${trade.coinName} chart" />
-        </div>
-        <p class="field-hint">
-          Image signal: <strong>${(chart.signal || "none").toUpperCase()}${pos}</strong>
-          ${chart.analyzedAt ? ` · analyzed ${formatTime(chart.analyzedAt)}` : ""}
-        </p>
-      </div>
-
-      <div class="trade-detail-checklist">
-        <h4>Future Trend Pro checklist</h4>
-        <p class="field-hint">${analysis.guideSummary || "All 5 conditions + Bias must agree before entry."}</p>
-        ${renderChecklistTable(analysis.checklist)}
-        ${
-          analysis.guidelineFailures?.length
-            ? `<div class="trade-block-reasons"><strong>Blocked because:</strong><ul>${analysis.guidelineFailures.map((f) => `<li>${f}</li>`).join("")}</ul></div>`
-            : analysis.guidelinesPassed
-              ? `<p class="field-hint ok">All guideline checks passed.</p>`
-              : ""
-        }
-      </div>
-    </div>
+    ${renderGuidelineAnalysisBody(trade)}
 
     <div class="trade-detail-panels">
-      <div class="trade-detail-panel">
-        <h4>Trade settings used</h4>
-        <ul class="trade-meta-list">
-          <li>Amount: <strong>${settings.tradeAmountUsdt ?? trade.usdt ?? "—"} USDT</strong></li>
-          <li>Leverage: <strong>${settings.tradeLeverage ?? trade.leverage ?? "—"}x</strong></li>
-          <li>Mode: <strong>${settings.tradeMode ?? trade.mode ?? "—"}</strong></li>
-          <li>Margin: <strong>${settings.tradeMarginType ?? "—"}</strong></li>
-          <li>TP / SL: <strong>${settings.tradeTpPercent ?? trade.tpPercent ?? "—"}% / ${settings.tradeSlPercent ?? trade.slPercent ?? "—"}%</strong></li>
-          <li>Interval: <strong>${settings.chartInterval || "15"}m</strong></li>
-          <li>Network: <strong>${settings.testnet || trade.testnet ? "Testnet" : "Live"}</strong></li>
-        </ul>
-      </div>
       <div class="trade-detail-panel">
         <h4>Binance result</h4>
         ${
@@ -951,31 +1113,126 @@ function renderTradeJournalDetail(trade) {
     selectedTradeId = null;
     tradeJournalDetail.classList.add("hidden");
     tradeJournalList.classList.remove("hidden");
+    tradeJournalPagination?.classList.remove("hidden");
   });
 
-  tradeJournalDetail.querySelector(".trade-detail-image-wrap img")?.addEventListener("click", (e) => {
-    openLightbox(e.target.src, `${trade.coinName} · ${signalLabel}`);
+  bindSignalDetailImages(tradeJournalDetail, trade);
+}
+
+function tradeJournalPeriodDays() {
+  return Number(pnlDaysSelect?.value) || 30;
+}
+
+function tradeJournalSinceMs(days = tradeJournalPeriodDays()) {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  if (days <= 1) return d.getTime();
+  d.setDate(d.getDate() - (days - 1));
+  return d.getTime();
+}
+
+function tradeJournalPeriodLabel(days = tradeJournalPeriodDays()) {
+  if (days <= 1) return "today";
+  return `last ${days} days`;
+}
+
+function filterTradeJournalByPeriod(trades) {
+  const sinceMs = tradeJournalSinceMs();
+  return trades.filter((t) => t.at && new Date(t.at).getTime() >= sinceMs);
+}
+
+function filterTradeJournalTrades(trades) {
+  const filter = tradeJournalFilter?.value || "all";
+  const inPeriod = filterTradeJournalByPeriod(trades);
+  if (filter === "all") return inPeriod;
+  return inPeriod.filter((t) => t.status === filter);
+}
+
+function tradeJournalEmptyMessage(filter, days = tradeJournalPeriodDays()) {
+  const period = days <= 1 ? "for today" : `in the last ${days} days`;
+  if (filter === "ok") return `No executed trades ${period}.`;
+  if (filter === "skipped") return `No blocked trades ${period}.`;
+  if (filter === "error") return `No error entries ${period}.`;
+  return days <= 1
+    ? "No trade journal entries for today."
+    : `No trade journal entries ${period}.`;
+}
+
+function renderTradeJournalPagination({ total, totalPages, perPage, start, filter, days }) {
+  if (!tradeJournalPagination) return;
+
+  if (total === 0) {
+    tradeJournalPagination.classList.add("hidden");
+    tradeJournalPagination.innerHTML = "";
+    return;
+  }
+
+  const periodLabel = ` · ${tradeJournalPeriodLabel(days)}`;
+  const filterLabel = filter === "all" ? "" : ` · ${filter}`;
+
+  if (totalPages <= 1) {
+    tradeJournalPagination.innerHTML = `
+      <p class="history-page-meta">Showing ${total} entr${total === 1 ? "y" : "ies"}${periodLabel}${filterLabel}</p>
+    `;
+    tradeJournalPagination.classList.remove("hidden");
+    return;
+  }
+
+  const end = Math.min(start + perPage, total);
+  tradeJournalPagination.innerHTML = `
+    <p class="history-page-meta">Showing ${start + 1}–${end} of ${total}${periodLabel}${filterLabel} · ${perPage} per page</p>
+    <div class="history-page-controls">
+      <button type="button" class="btn btn-secondary btn-sm" data-trade-journal-page="prev" ${tradeJournalPage <= 1 ? "disabled" : ""}>← Prev</button>
+      <span class="history-page-label">Page ${tradeJournalPage} of ${totalPages}</span>
+      <button type="button" class="btn btn-secondary btn-sm" data-trade-journal-page="next" ${tradeJournalPage >= totalPages ? "disabled" : ""}>Next →</button>
+    </div>
+  `;
+
+  tradeJournalPagination.querySelectorAll("[data-trade-journal-page]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      if (btn.dataset.tradeJournalPage === "prev" && tradeJournalPage > 1) {
+        tradeJournalPage -= 1;
+      } else if (btn.dataset.tradeJournalPage === "next" && tradeJournalPage < totalPages) {
+        tradeJournalPage += 1;
+      }
+      renderTradeJournalList(cachedTradeJournal);
+      tradeJournalList?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
   });
+
+  tradeJournalPagination.classList.remove("hidden");
 }
 
 function renderTradeJournalList(trades) {
   const filter = tradeJournalFilter?.value || "all";
-  const filtered =
-    filter === "all" ? trades : trades.filter((t) => t.status === filter);
+  const days = tradeJournalPeriodDays();
+  const filtered = filterTradeJournalTrades(trades);
+  const perPage = TRADE_JOURNAL_PER_PAGE;
+  const total = filtered.length;
+  const totalPages = Math.max(1, Math.ceil(total / perPage));
 
-  if (filtered.length === 0) {
-    tradeJournalList.innerHTML = `<p class="empty-state">No trade journal entries yet. Enable auto-trade and wait for a signal.</p>`;
+  if (tradeJournalPage > totalPages) tradeJournalPage = totalPages;
+  if (tradeJournalPage < 1) tradeJournalPage = 1;
+
+  const start = (tradeJournalPage - 1) * perPage;
+  const pageTrades = filtered.slice(start, start + perPage);
+
+  if (total === 0) {
+    tradeJournalList.innerHTML = `<p class="empty-state">${tradeJournalEmptyMessage(filter, days)}</p>`;
+    renderTradeJournalPagination({ total: 0, totalPages: 1, perPage, start: 0, filter, days });
     return;
   }
 
-  tradeJournalList.innerHTML = filtered
+  tradeJournalList.innerHTML = pageTrades
     .map((trade) => {
       const analysis = trade.analysis || {};
       const chart = analysis.chartSignal || {};
       const passed = analysis.guidelinesPassed;
       const checklist = analysis.checklist || [];
-      const passCount = checklist.filter((c) => c.passed).length;
-      const totalChecks = checklist.length;
+      const passStats = analysis.guidelinePassStats || {};
+      const passCount = passStats.passed ?? checklist.filter((c) => c.passed && c.key !== "signal").length;
+      const totalChecks = passStats.total ?? checklist.filter((c) => c.key !== "signal").length;
+      const passPercent = analysis.guidelinePassPercent;
       const thumb = analysis.screenshotUrl || `/screenshots/current/${trade.coinId}.png`;
 
       return `
@@ -996,7 +1253,7 @@ function renderTradeJournalList(trades) {
             </p>
             ${
               totalChecks
-                ? `<p class="trade-journal-checks">Guideline checks: <strong>${passCount}/${totalChecks}</strong> ${passed ? "· ready" : "· blocked"}</p>`
+                ? `<p class="trade-journal-checks">Guideline checks: <strong>${passCount}/${totalChecks}</strong>${passPercent != null ? ` (${passPercent}%)` : ""} ${passed ? "· passed (≥70%)" : "· below 70%"}</p>`
                 : ""
             }
             ${
@@ -1020,6 +1277,7 @@ function renderTradeJournalList(trades) {
       if (!trade) return;
       selectedTradeId = id;
       tradeJournalList.classList.add("hidden");
+      tradeJournalPagination?.classList.add("hidden");
       tradeJournalDetail.classList.remove("hidden");
       renderTradeJournalDetail(trade);
     };
@@ -1029,6 +1287,8 @@ function renderTradeJournalList(trades) {
       open();
     });
   });
+
+  renderTradeJournalPagination({ total, totalPages, perPage, start, filter, days });
 }
 
 function formatUsd(value, { signed = true } = {}) {
@@ -1212,7 +1472,7 @@ function renderTradeJournalSummary(trades) {
 
   tradeJournalSummary.innerHTML = `
     <p><strong>${trades.length}</strong> total · <span class="trade-status-ok">${executed} executed</span> · <span class="trade-status-blocked">${blocked} blocked</span> · <span class="trade-status-error">${errors} errors</span></p>
-    <p class="field-hint">Every entry saves the chart screenshot, BUY/SELL signal, and full Future Trend Pro checklist from the trading guide.</p>
+    <p class="field-hint">Guidelines pass at <strong>≥70%</strong> of the Future Trend Pro checklist. Journal entries are re-scored from saved checklist data.</p>
   `;
 }
 
@@ -1224,12 +1484,13 @@ async function loadTradeJournal() {
   tradeJournalList.innerHTML = "";
   tradeJournalDetail.classList.add("hidden");
   tradeJournalList.classList.remove("hidden");
+  tradeJournalPagination?.classList.add("hidden");
 
-  const days = Number(pnlDaysSelect?.value) || 30;
+  const days = tradeJournalPeriodDays();
 
   try {
     const [tradesRes, pnlRes] = await Promise.all([
-      fetch("/api/trades?limit=100"),
+      fetch("/api/trades?limit=500"),
       fetch(`/api/pnl-report?days=${encodeURIComponent(days)}`),
     ]);
     const tradesData = await parseJsonResponse(tradesRes);
@@ -1239,6 +1500,7 @@ async function loadTradeJournal() {
 
     cachedTradeJournal = tradesData.trades || [];
     cachedPnLReport = pnlData.report || null;
+    tradeJournalPage = 1;
     renderPnLReport(cachedPnLReport);
     renderTradeJournalSummary(cachedTradeJournal);
     renderTradeJournalList(cachedTradeJournal);
@@ -1247,6 +1509,7 @@ async function loadTradeJournal() {
       const trade = cachedTradeJournal.find((t) => t.id === selectedTradeId);
       if (trade) {
         tradeJournalList.classList.add("hidden");
+        tradeJournalPagination?.classList.add("hidden");
         tradeJournalDetail.classList.remove("hidden");
         renderTradeJournalDetail(trade);
       }
@@ -1292,17 +1555,17 @@ function renderLocalAnalyzeSummary(data) {
       <div class="pnl-card ${pnlClass(today.totalPnl)}">
         <span class="pnl-card-label">Today simulated P&amp;L</span>
         <strong>${formatUsd(today.totalPnl)}</strong>
-        <span class="pnl-card-sub">${today.simulated || 0} paper trades · ${today.wins || 0}W / ${today.losses || 0}L / ${today.openAfter3 || 0} open</span>
+        <span class="pnl-card-sub">${today.simulated || 0} paper trades${today.winRate != null ? ` · ${today.winRate}% win` : ""} · ${today.wins || 0}W / ${today.losses || 0}L / ${today.openAfter3 || 0} flat</span>
       </div>
       <div class="pnl-card">
         <span class="pnl-card-label">Win rate</span>
         <strong>${t.winRate != null ? `${t.winRate}%` : "—"}</strong>
-        <span class="pnl-card-sub">${t.wins || 0}W / ${t.losses || 0}L / ${t.openAfter3 || 0} open</span>
+        <span class="pnl-card-sub">${t.wins || 0}W / ${t.losses || 0}L / ${t.openAfter3 || 0} flat</span>
       </div>
       <div class="pnl-card">
         <span class="pnl-card-label">Signals found</span>
         <strong>${t.signalsDetected || 0}</strong>
-        <span class="pnl-card-sub">all assumed passed</span>
+        <span class="pnl-card-sub">≥70% checklist pass</span>
       </div>
       <div class="pnl-card">
         <span class="pnl-card-label">SS sets used</span>
@@ -1312,7 +1575,7 @@ function renderLocalAnalyzeSummary(data) {
     </div>
     <p class="field-hint">
       Uses signals saved at capture time (same source as Signal Chart).
-      <strong>Guidelines assumed passed</strong> for every signal.
+      <strong>Guidelines pass at ≥70%</strong> of the Future Trend Pro checklist (read from each entry screenshot).
       Simulates <strong>${s.tradeAmountUsdt || 2} USDT</strong> × <strong>${s.tradeLeverage || 10}x</strong>
       · TP <strong>${s.tradeTpPercent || 30}%</strong> · SL <strong>${s.tradeSlPercent || 30}%</strong>
       · Mode <strong>${s.tradeMode || "long_only"}</strong>
@@ -1377,18 +1640,18 @@ function renderLocalAnalyzeCoinTable(perCoin, activeCoinId = null, { loading = f
         ${rows
           .map((row) => {
             const c = row.counts;
-            const pending = loading && !c;
+            const pending = loading;
             const isActive = activeCoinId === row.coinId;
             const hasTrades = !pending && (c?.simulated || 0) > 0;
             return `
             <tr class="${isActive ? "local-analyze-row-active" : ""}${pending ? " local-analyze-row-pending" : ""}">
               <td><strong>${row.coinName}</strong><div class="card-symbol">${row.coinId}</div></td>
-              <td>${pending ? "…" : c.signalsDetected || 0}</td>
-              <td>${pending ? "…" : c.guidelinesPassed || 0}</td>
-              <td>${pending ? "…" : c.simulated || 0}</td>
-              <td>${pending ? "…" : `${c.wins || 0} / ${c.losses || 0} / ${c.openAfter3 || 0}`}</td>
-              <td>${pending ? "…" : c.winRate != null ? `${c.winRate}%` : "—"}</td>
-              <td class="${pending ? "" : pnlClass(c.totalPnl)}">${pending ? "…" : formatUsd(c.totalPnl)}</td>
+              <td>${pending ? "…" : c?.signalsDetected || 0}</td>
+              <td>${pending ? "…" : c?.guidelinesPassed || 0}</td>
+              <td>${pending ? "…" : c?.simulated || 0}</td>
+              <td>${pending ? "…" : `${c?.wins || 0} / ${c?.losses || 0} / ${c?.openAfter3 || 0}`}</td>
+              <td>${pending ? "…" : c?.winRate != null ? `${c.winRate}%` : "—"}</td>
+              <td class="${pending ? "" : pnlClass(c?.totalPnl)}">${pending ? "…" : formatUsd(c?.totalPnl)}</td>
               <td>
                 <button
                   type="button"
@@ -1518,8 +1781,8 @@ function renderLocalAnalyzeDetail(sim) {
       </div>
       <div class="trade-detail-panel">
         <h4>Guidelines</h4>
-        <p class="field-hint">Future Trend Pro checklist is <strong>assumed passed</strong> for this paper trade analysis.</p>
-        ${analysis.guidelinesAssumed ? "" : renderChecklistTable(checklist)}
+        <p class="field-hint">${analysis.guidelinePassPercent != null ? `${analysis.guidelinePassPercent}% checklist complete` : "Checklist"} · need ≥70% to pass</p>
+        ${renderChecklistTable(checklist)}
       </div>
     </div>
   `;
@@ -1597,13 +1860,14 @@ async function runLocalAnalyze() {
   if (!localAnalyzeSummary) return;
 
   const days = Number(localAnalyzeDays?.value) || 1;
-  cachedLocalAnalyzeKey = String(days);
 
   const rangeLabel = days === 1 ? "today" : `last ${days} days`;
   localAnalyzeStatus.textContent = `Analyzing ${rangeLabel}'s screenshots… this may take a minute.`;
-  renderLocalAnalyzeCoinTable(cachedLocalAnalysis?.perCoin, selectedLocalAnalyzeCoinId, {
-    loading: true,
-  });
+  renderLocalAnalyzeCoinTable(null, selectedLocalAnalyzeCoinId, { loading: true });
+  if (selectedLocalAnalyzeCoinId) {
+    renderLocalAnalyzeListHeader(null);
+    localAnalyzeList.innerHTML = `<p class="field-hint local-analyze-prompt">Reloading paper trades…</p>`;
+  }
   runLocalAnalyzeBtn.disabled = true;
 
   try {
@@ -1612,10 +1876,8 @@ async function runLocalAnalyze() {
     if (!res.ok) throw new Error(data.error);
 
     cachedLocalAnalysis = data.analysis;
-    selectedLocalAnalyzeCoinId = null;
+    cachedLocalAnalyzeKey = String(days);
     selectedLocalSimId = null;
-    localAnalyzeListHeader?.classList.add("hidden");
-    localAnalyzeListHeader.innerHTML = "";
     localAnalyzeDetail.classList.add("hidden");
     localAnalyzeList.classList.remove("hidden");
     renderLocalAnalyzeFromCache();
@@ -1632,12 +1894,6 @@ function renderLocalAnalyzeFromCache() {
   localAnalyzeStatus.textContent = `Done · ${cachedLocalAnalysis.simulations?.length || 0} simulated trades from ${cachedLocalAnalysis.setsUsed} screenshot sets.`;
   renderLocalAnalyzeSummary(cachedLocalAnalysis);
   renderLocalAnalyzeCoinTable(cachedLocalAnalysis.perCoin, selectedLocalAnalyzeCoinId);
-  if (selectedLocalAnalyzeCoinId) {
-    viewLocalAnalyzeCoinReport(selectedLocalAnalyzeCoinId);
-  } else {
-    renderLocalAnalyzeListHeader(null);
-    localAnalyzeList.innerHTML = `<p class="field-hint local-analyze-prompt">Click <strong>View Report</strong> on a coin in the table above to see its paper trades below.</p>`;
-  }
 
   if (selectedLocalSimId) {
     const sim = cachedLocalAnalysis.simulations?.find((s) => s.id === selectedLocalSimId);
@@ -1645,7 +1901,16 @@ function renderLocalAnalyzeFromCache() {
       localAnalyzeList.classList.add("hidden");
       localAnalyzeDetail.classList.remove("hidden");
       renderLocalAnalyzeDetail(sim);
+      return;
     }
+    selectedLocalSimId = null;
+  }
+
+  if (selectedLocalAnalyzeCoinId) {
+    viewLocalAnalyzeCoinReport(selectedLocalAnalyzeCoinId);
+  } else {
+    renderLocalAnalyzeListHeader(null);
+    localAnalyzeList.innerHTML = `<p class="field-hint local-analyze-prompt">Click <strong>View Report</strong> on a coin in the table above to see its paper trades below.</p>`;
   }
 }
 
@@ -1668,9 +1933,7 @@ async function loadLocalAnalyze(options = {}) {
     return;
   }
 
-  renderLocalAnalyzeCoinTable(cachedLocalAnalysis?.perCoin, selectedLocalAnalyzeCoinId, {
-    loading: true,
-  });
+  renderLocalAnalyzeCoinTable(null, selectedLocalAnalyzeCoinId, { loading: true });
   localAnalyzeStatus.textContent = forceToday
     ? "Loading today's paper trade table…"
     : "Loading paper trade table…";
@@ -2212,9 +2475,14 @@ lightbox.querySelectorAll("[data-close-lightbox]").forEach((el) => {
   el.addEventListener("click", closeLightbox);
 });
 
+signalChartModal?.querySelectorAll("[data-close-signal-modal]").forEach((el) => {
+  el.addEventListener("click", closeSignalChartModal);
+});
+
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && !lightbox.classList.contains("hidden")) {
-    closeLightbox();
+  if (e.key === "Escape") {
+    if (!lightbox.classList.contains("hidden")) closeLightbox();
+    if (!signalChartModal?.classList.contains("hidden")) closeSignalChartModal();
   }
 });
 
@@ -2269,11 +2537,17 @@ clearCompareBtn.addEventListener("click", () => {
 });
 
 refreshSignalChartBtn?.addEventListener("click", loadSignalChart);
-pnlDaysSelect?.addEventListener("change", loadTradeJournal);
-tradeJournalFilter?.addEventListener("change", () => renderTradeJournalList(cachedTradeJournal));
+pnlDaysSelect?.addEventListener("change", () => {
+  tradeJournalPage = 1;
+  loadTradeJournal();
+});
+tradeJournalFilter?.addEventListener("change", () => {
+  tradeJournalPage = 1;
+  renderTradeJournalList(cachedTradeJournal);
+});
 refreshTradeJournalBtn?.addEventListener("click", loadTradeJournal);
 runLocalAnalyzeBtn?.addEventListener("click", runLocalAnalyze);
-localAnalyzeDays?.addEventListener("change", loadLocalAnalyze);
+localAnalyzeDays?.addEventListener("change", () => loadLocalAnalyze({ force: true }));
 signalDaysSelect?.addEventListener("change", loadSignalChart);
 
 refreshBtn.addEventListener("click", async () => {
