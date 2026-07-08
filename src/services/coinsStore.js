@@ -61,14 +61,33 @@ function normalizeCoin(coin) {
     symbol: coin.symbol,
     group: normalizeGroup(coin.group || DEFAULT_GROUP_BY_ID[coin.id]),
     pinned: Boolean(coin.pinned ?? DEFAULT_PINNED.has(coin.id)),
+    enabled: coin.enabled !== false,
   };
 }
 
 function sortCoins(coins) {
-  return [...coins].sort((a, b) => {
-    if (a.pinned !== b.pinned) return Number(b.pinned) - Number(a.pinned);
-    return a.name.localeCompare(b.name);
-  });
+  return coins
+    .map((coin, index) => ({ coin, index }))
+    .sort((a, b) => {
+      if (a.coin.enabled !== b.coin.enabled) {
+        return Number(b.coin.enabled) - Number(a.coin.enabled);
+      }
+      if (a.coin.pinned !== b.coin.pinned) {
+        return Number(b.coin.pinned) - Number(a.coin.pinned);
+      }
+      return a.index - b.index;
+    })
+    .map(({ coin }) => coin);
+}
+
+/** Keep coin-list order (pinned first, then list sequence). */
+function orderCoinIds(ids, coins) {
+  const idSet = new Set(ids);
+  const ordered = coins.map((c) => c.id).filter((id) => idSet.has(id));
+  for (const id of ids) {
+    if (!ordered.includes(id)) ordered.push(id);
+  }
+  return ordered;
 }
 
 async function loadCoins() {
@@ -94,6 +113,11 @@ async function getCoins({ group = null } = {}) {
   const coins = sortCoins(await loadCoins());
   if (!group || group === "all") return coins;
   return coins.filter((c) => c.group === group);
+}
+
+async function getActiveCoins(options = {}) {
+  const coins = await getCoins(options);
+  return coins.filter((c) => c.enabled);
 }
 
 async function addCoin({ name, symbol, id, group }) {
@@ -124,6 +148,7 @@ async function addCoin({ name, symbol, id, group }) {
     symbol: trimmedSymbol,
     group: group || DEFAULT_GROUP,
     pinned: false,
+    enabled: true,
   });
   coins.push(coin);
   await saveCoins(coins);
@@ -152,6 +177,9 @@ async function updateCoin(coinId, patch) {
   if (patch.pinned !== undefined) {
     updated.pinned = Boolean(patch.pinned);
   }
+  if (patch.enabled !== undefined) {
+    updated.enabled = Boolean(patch.enabled);
+  }
 
   coins[index] = updated;
   await saveCoins(coins);
@@ -172,10 +200,12 @@ async function removeCoin(coinId) {
 module.exports = {
   GROUPS,
   getCoins,
+  getActiveCoins,
   addCoin,
   updateCoin,
   removeCoin,
   sortCoins,
+  orderCoinIds,
   normalizeCoin,
   slugFromSymbol,
 };

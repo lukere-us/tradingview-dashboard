@@ -62,7 +62,9 @@
             <button id="refreshGroupBtn" class="btn btn-secondary btn-sm">Refresh Group</button>
           </section>
           <section class="meta">
-            <p id="lastRun">Last update: —</p>
+            <p id="lastRun">
+              <span id="lastRunText">Last update: —</span><span id="nextCaptureCountdown" class="next-capture-countdown"></span>
+            </p>
             <p id="autoRefresh">Auto-refresh: every 5 minutes</p>
             <p id="gridLayout">Layout: 3 per row</p>
           </section>
@@ -91,7 +93,7 @@
           <header class="page-header">
             <div>
               <h2>Coin List</h2>
-              <p class="subtitle">Add or remove coins to capture</p>
+              <p class="subtitle">Add, enable, or disable coins for capture</p>
             </div>
           </header>
 

@@ -2,11 +2,11 @@ const fs = require("fs/promises");
 const path = require("path");
 const { listSets, HISTORY_DIR } = require("./historyStore");
 const { buildTradeAnalysis, checkTradeGuidelines } = require("./tradeGuidelines");
-const { loadHistory } = require("./signalHistoryStore");
-const { getCoins } = require("./coinsStore");
+const { getActiveCoins } = require("./coinsStore");
 const { getSettings } = require("./settingsStore");
 const { futuresSymbol } = require("./binanceTrade");
-const { HOLD_CANDLES, holdDurationMs } = require("./signalMemory");
+const { HOLD_CANDLES, filterSignalEpisodes } = require("./signalMemory");
+const { analyzeChartSignal } = require("./chartSignal");
 
 const FORWARD_CAPTURES = 3;
 
@@ -93,14 +93,6 @@ function tradeTotalsSnapshot(counts) {
   };
 }
 
-/** Same BUY/SELL episode within hold window — matches live signal memory. */
-function isSameSignalWithinHold(lastActed, lastActedAt, signal, atMs, chartInterval) {
-  if (!lastActed || !lastActedAt || lastActed !== signal) return false;
-  const actedAt = new Date(lastActedAt).getTime();
-  if (!Number.isFinite(actedAt) || !Number.isFinite(atMs)) return false;
-  return atMs - actedAt < holdDurationMs(chartInterval);
-}
-
 
 async function loadSetMeta(setId) {
   try {
@@ -161,62 +153,26 @@ async function ensureSetPrices(set, coins) {
   return prices;
 }
 
-async function resolveCaptureSignal(
-  set,
-  coin,
-  settings,
-  imagePath,
-  legacyEvents = [],
-  countedLegacyKeys = null
-) {
-  const meta = (await loadSetMeta(set.id)) || set;
-  const stored = meta.signals?.[coin.id];
-
-  if (stored) {
-    if (
-      !stored.isNewSignal ||
-      (stored.signal !== "buy" && stored.signal !== "sell")
-    ) {
-      return { isNewSignal: false };
-    }
-
-    return {
-      isNewSignal: true,
-      signal: stored.signal,
-      chartResult: {
-        signal: stored.signal,
-        position: stored.position,
-        analyzedAt: stored.analyzedAt,
-      },
-      fromMeta: true,
-    };
-  }
-
-  const setAt = new Date(set.at).getTime();
-  const legacyEvent = legacyEvents.find(
-    (event) =>
-      event.coinId === coin.id &&
-      (event.signal === "buy" || event.signal === "sell") &&
-      Math.abs(new Date(event.at).getTime() - setAt) < 120_000
-  );
-
-  if (!legacyEvent) {
+async function resolveCaptureSignal(set, coin, settings, imagePath) {
+  try {
+    await fs.access(imagePath);
+  } catch {
     return { isNewSignal: false };
   }
 
-  const legacyKey = `${legacyEvent.coinId}:${legacyEvent.at}`;
-  if (countedLegacyKeys?.has(legacyKey)) {
+  const detected = await analyzeChartSignal(imagePath);
+  if (detected.signal !== "buy" && detected.signal !== "sell") {
     return { isNewSignal: false };
   }
-  countedLegacyKeys?.add(legacyKey);
 
   return {
     isNewSignal: true,
-    signal: legacyEvent.signal,
+    signal: detected.signal,
     chartResult: {
-      signal: legacyEvent.signal,
-      position: legacyEvent.position || null,
-      analyzedAt: legacyEvent.at,
+      signal: detected.signal,
+      position: detected.position,
+      highlight: detected.highlight,
+      analyzedAt: set.at,
     },
     fromMeta: false,
   };
@@ -366,18 +322,16 @@ function summarizeTodayPnl(simulations) {
 async function analyzeCoinAcrossHistory(coin, sets, settings, options = {}) {
   const { onProgress } = options;
   const simulations = [];
-  let lastActedSignal = null;
-  let lastActedAt = null;
-  const chartInterval = settings.chartInterval || "15";
+  const rawDetections = [];
 
   let signalsDetected = 0;
   let guidelinesPassed = 0;
   let simulated = 0;
   let totalPnl = 0;
-  const legacyEvents = await loadHistory();
-  const countedLegacyKeys = new Set();
 
-  for (let i = 0; i <= sets.length - FORWARD_CAPTURES - 1; i++) {
+  const scanLimit = sets.length - FORWARD_CAPTURES;
+
+  for (let i = 0; i < scanLimit; i++) {
     const set = sets[i];
     const imagePath = path.join(HISTORY_DIR, set.id, `${coin.id}.png`);
 
@@ -389,18 +343,26 @@ async function analyzeCoinAcrossHistory(coin, sets, settings, options = {}) {
 
     onProgress?.({ coinId: coin.id, index: i, total: sets.length });
 
-    const captured = await resolveCaptureSignal(
-      set,
-      coin,
-      settings,
-      imagePath,
-      legacyEvents,
-      countedLegacyKeys
-    );
-
+    const captured = await resolveCaptureSignal(set, coin, settings, imagePath);
     if (!captured.isNewSignal) continue;
 
-    const { signal, chartResult } = captured;
+    rawDetections.push({
+      at: set.at,
+      signal: captured.signal,
+      setIndex: i,
+      chartResult: captured.chartResult,
+      imagePath,
+    });
+  }
+
+  const episodes = filterSignalEpisodes(rawDetections);
+
+  for (const episode of episodes) {
+    const i = episode.setIndex;
+    const set = sets[i];
+    const imagePath = episode.imagePath;
+    const signal = episode.signal;
+    const chartResult = episode.chartResult;
 
     const guide = await checkTradeGuidelines({
       coinId: coin.id,
@@ -410,23 +372,8 @@ async function analyzeCoinAcrossHistory(coin, sets, settings, options = {}) {
     });
     if (!guide.ok) continue;
 
-    const setAtMs = new Date(set.at).getTime();
-    if (
-      isSameSignalWithinHold(
-        lastActedSignal,
-        lastActedAt,
-        signal,
-        setAtMs,
-        chartInterval
-      )
-    ) {
-      continue;
-    }
-
     signalsDetected++;
     guidelinesPassed++;
-    lastActedSignal = signal;
-    lastActedAt = set.at;
 
     const prices = await ensureSetPrices(set, [coin]);
     const entryPrice = prices[coin.id];
@@ -515,7 +462,7 @@ async function analyzeCoinAcrossHistory(coin, sets, settings, options = {}) {
 
 async function runLocalTradeAnalysis(options = {}) {
   const settings = await getSettings();
-  const coins = await getCoins();
+  const coins = await getActiveCoins();
   const days = Math.min(90, Math.max(1, Number(options.days) || 30));
   const coinId = options.coinId || null;
   const allSetsList = await listSets();

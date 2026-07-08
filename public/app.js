@@ -15,7 +15,8 @@ const refreshGroupBtn = document.getElementById("refreshGroupBtn");
 const refreshBtn = document.getElementById("refreshBtn");
 const autoRefreshBtn = document.getElementById("autoRefreshBtn");
 const statusBadge = document.getElementById("statusBadge");
-const lastRunEl = document.getElementById("lastRun");
+const lastRunTextEl = document.getElementById("lastRunText");
+const nextCaptureCountdownEl = document.getElementById("nextCaptureCountdown");
 const autoRefreshEl = document.getElementById("autoRefresh");
 const gridLayoutEl = document.getElementById("gridLayout");
 
@@ -219,8 +220,9 @@ function isCaptureTarget(coin, progress) {
 }
 
 function filterCoinsForView(coins) {
-  if (activeGroup === "all") return coins;
-  return coins.filter((c) => c.group === activeGroup);
+  const enabled = coins.filter((c) => c.enabled !== false);
+  if (activeGroup === "all") return enabled;
+  return enabled.filter((c) => c.group === activeGroup);
 }
 
 function formatPrice(price) {
@@ -264,42 +266,127 @@ function renderAlertBadges(alert) {
 }
 
 function signalHighlightClass(chartSignal) {
-  if (!chartSignal?.highlight) return "";
-  return `signal-${chartSignal.highlight}`;
+  const highlight = chartSignal?.highlight;
+  if (highlight === "buy" || highlight === "sell") {
+    return `signal-${highlight}`;
+  }
+  return "";
+}
+
+function markerBoxStyle(rect, imageWidth, imageHeight) {
+  const w = imageWidth || 1280;
+  const h = imageHeight || 720;
+  const left = (rect.left / w) * 100;
+  const top = (rect.top / h) * 100;
+  const width = ((rect.right - rect.left) / w) * 100;
+  const height = ((rect.bottom - rect.top) / h) * 100;
+  return `left:${left}%;top:${top}%;width:${width}%;height:${height}%;`;
+}
+
+function renderSignalScanOverlay(chartSignal) {
+  const markers = chartSignal?.markers;
+  if (!markers) return "";
+
+  const w = markers.imageWidth || 1280;
+  const h = markers.imageHeight || 720;
+  const { lastCandles, scanArea, labelBox } = markers;
+
+  let labelHtml = "";
+  if (labelBox) {
+    const rect = {
+      left: labelBox.x,
+      top: labelBox.y,
+      right: labelBox.x + labelBox.width,
+      bottom: labelBox.y + labelBox.height,
+    };
+    const accepted = labelBox.accepted ? "accepted" : "rejected";
+    const kind = labelBox.signal || "none";
+    labelHtml = `
+      <div
+        class="signal-scan-label signal-scan-label-${kind} ${accepted}"
+        style="${markerBoxStyle(rect, w, h)}"
+        title="${accepted ? `${kind.toUpperCase()} label accepted` : `${kind.toUpperCase()} label rejected`}"
+      ></div>
+    `;
+  }
+
+  return `
+    <div class="signal-scan-overlay" aria-hidden="true">
+      <div
+        class="signal-scan-band"
+        style="${markerBoxStyle(scanArea, w, h)}"
+        title="BUY/SELL label search area"
+      ></div>
+      <div
+        class="signal-scan-last3"
+        style="${markerBoxStyle(lastCandles, w, h)}"
+        title="Last 3 candles"
+      ></div>
+      ${labelHtml}
+      <span class="signal-scan-legend">Scan: last 3 candles</span>
+    </div>
+  `;
 }
 
 function renderTitleSignalResult(chartSignal) {
-  // Only show a live label on the last 3 candles. Memory (no-repeat) stays server-side.
   const live = chartSignal?.signal;
+  const highlight = chartSignal?.highlight;
   if (!live || live === "none") {
+    return "";
+  }
+  if (highlight !== "buy" && highlight !== "sell") {
+    return "";
+  }
+  if (live !== highlight) {
     return "";
   }
 
   const label = live.toUpperCase();
-  const pos =
-    chartSignal.position === "top"
-      ? " top"
-      : chartSignal.position === "bottom"
-        ? " bottom"
-        : "";
-  const cls = chartSignal.highlight || live;
+  const pos = highlight === "buy" ? " bottom" : " top";
 
-  return `<span class="card-analyze-status ${cls}"> · ${label}${pos}</span>`;
+  return `<span class="card-analyze-status ${highlight}"> · ${label}${pos}</span>`;
 }
 
-function renderTitleAnalyzeStatus(coin, { signalAnalysis, chartSignal }) {
+function renderTitleCoinStatus(
+  coin,
+  { running, progress, signalAnalysis, chartSignal, resultMap = {} }
+) {
   const queue = signalAnalysis?.queue || [];
-  const inQueue = queue.includes(coin.id);
+  const inAnalysisQueue = queue.includes(coin.id);
 
-  if (signalAnalysis?.running && inQueue) {
+  if (signalAnalysis?.running && inAnalysisQueue) {
     if (signalAnalysis.current === coin.id) {
-      return `<span class="card-analyze-status analyzing"> · Scanning last 3 candles…</span>`;
+      return `<span class="card-coin-status card-analyze-status analyzing"> · Analyzing…</span>`;
     }
     if (signalAnalysis.completed?.includes(coin.id)) {
       const sig = signalAnalysis.results?.[coin.id] || chartSignal;
       return renderTitleSignalResult(sig);
     }
-    return `<span class="card-analyze-status waiting"> · Waiting for analysis…</span>`;
+    return `<span class="card-coin-status card-analyze-status waiting"> · Waiting to analyze…</span>`;
+  }
+
+  if (running && progress) {
+    if (!isCaptureTarget(coin, progress)) {
+      if (resultMap[coin.id]?.status === "error") {
+        return `<span class="card-coin-status card-analyze-status error"> · Capture failed</span>`;
+      }
+      return renderTitleSignalResult(chartSignal);
+    }
+
+    const partial = progress.partialResults?.find((r) => r.coin === coin.id);
+    if (partial?.status === "ok") {
+      return `<span class="card-coin-status card-analyze-status captured"> · Captured</span>`;
+    }
+    if (partial?.status === "error") {
+      return `<span class="card-coin-status card-analyze-status error"> · Capture failed</span>`;
+    }
+    if (progress.currentCoin === coin.id) {
+      if (progress.retryAttempt && progress.retryMax) {
+        return `<span class="card-coin-status card-analyze-status analyzing"> · Retrying ${progress.retryAttempt}/${progress.retryMax}…</span>`;
+      }
+      return `<span class="card-coin-status card-analyze-status analyzing"> · Capturing…</span>`;
+    }
+    return `<span class="card-coin-status card-analyze-status waiting"> · Waiting…</span>`;
   }
 
   if (chartSignal?.analyzedAt || (chartSignal && chartSignal.signal !== undefined)) {
@@ -376,6 +463,7 @@ function renderCardImage(coin, imageUrl, visual, cacheBust) {
       data-caption="${coin.name} (${coin.symbol})"
       onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';"
     />
+    ${renderSignalScanOverlay(coin.chartSignal)}
     <div class="placeholder" style="display:none">No screenshot yet</div>
   `;
 }
@@ -534,7 +622,7 @@ function renderCoinGrid(container, coins, options = {}) {
         <article class="card ${coin.pinned ? "pinned-card" : ""}" data-coin-id="${coin.id}">
           <div class="card-header">
             <div class="card-title-row">
-              <h3>${coin.name}<span class="card-duration">${titleDuration ? ` · ${titleDuration}` : ""}</span>${renderTitleAnalyzeStatus(coin, { signalAnalysis, chartSignal: coin.chartSignal })}</h3>
+              <h3>${coin.name}${renderTitleCoinStatus(coin, { running, progress, signalAnalysis, chartSignal: coin.chartSignal, resultMap })}<span class="card-duration">${titleDuration ? ` · ${titleDuration}` : ""}</span></h3>
               ${
                 showActions
                   ? `<div class="card-header-actions">
@@ -611,6 +699,34 @@ async function togglePin(coinId) {
   }
 }
 
+async function toggleCoinEnabled(coinId) {
+  const coin = cachedCoins.find((c) => c.id === coinId);
+  if (!coin) return;
+
+  const nextEnabled = coin.enabled === false;
+
+  try {
+    const res = await fetch(`/api/coins/${encodeURIComponent(coinId)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: nextEnabled }),
+    });
+    const data = await parseJsonResponse(res);
+    if (!res.ok) throw new Error(data.error);
+
+    if (!nextEnabled) {
+      compareSelection.delete(coinId);
+    }
+
+    await refreshDashboard({ reRender: true });
+    if (currentView === "coins") await loadCoinsTable();
+    if (currentView === "compare") renderCompareView();
+  } catch (err) {
+    alert(err.message || "Failed to update coin");
+    if (currentView === "coins") await loadCoinsTable();
+  }
+}
+
 function toggleComparePick(coinId) {
   if (compareSelection.has(coinId)) {
     compareSelection.delete(coinId);
@@ -629,16 +745,39 @@ function formatDayLabel(day) {
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+function sortByCoinListOrder(items, getId = (item) => item.id) {
+  if (!cachedCoins?.length) return items;
+  const index = new Map(cachedCoins.map((c, i) => [c.id, i]));
+  return [...items].sort(
+    (a, b) =>
+      (index.get(getId(a)) ?? 9999) - (index.get(getId(b)) ?? 9999)
+  );
+}
+
 async function loadSignalChart() {
   const days = Number(signalDaysSelect?.value) || 1;
   signalChartSummary.innerHTML = `<p>Loading signal stats…</p>`;
   signalChartBars.innerHTML = "";
   signalChartTable.innerHTML = "";
 
+  if (!cachedCoins?.length) {
+    try {
+      const dash = await fetchDashboard();
+      cachedCoins = dash.coins || [];
+      cachedGroups = dash.groups || cachedGroups;
+    } catch {
+      // Reorder will fall back to API order.
+    }
+  }
+
   try {
     const res = await fetch(`/api/signal-stats?days=${encodeURIComponent(days)}`);
     const data = await parseJsonResponse(res);
     if (!res.ok) throw new Error(data.error);
+
+    if (data.coins?.length) {
+      data.coins = sortByCoinListOrder(data.coins, (row) => row.coinId);
+    }
 
     renderSignalChart(data);
   } catch (err) {
@@ -930,15 +1069,28 @@ function renderSignalChart(data) {
     coins = [],
     totals = { buy: 0, sell: 0, passedBuy: 0, passedSell: 0 },
     guidelinePassPercent = 70,
+    rolling24h = false,
+    sinceAt = null,
+    untilAt = null,
   } = data;
+
+  const rangeLabel = rolling24h
+    ? `Last 24 hours · signals since ${formatTime(sinceAt)}`
+    : `${days[0] || "—"} → ${days[days.length - 1] || "—"}`;
+
+  const todayStartLine =
+    rolling24h && sinceAt
+      ? `<p><strong>Today signals start:</strong> ${formatTime(sinceAt)} <span class="field-hint">→ now (${formatTime(untilAt)})</span></p>`
+      : "";
 
   signalChartSummary.innerHTML = `
     <p><strong>Buy signals:</strong> <span class="signal-total buy">${totals.buy}</span>
       · <strong>Passed (≥${guidelinePassPercent}%):</strong> <span class="signal-total passed buy">${totals.passedBuy || 0}</span></p>
     <p><strong>Sell signals:</strong> <span class="signal-total sell">${totals.sell}</span>
       · <strong>Passed (≥${guidelinePassPercent}%):</strong> <span class="signal-total passed sell">${totals.passedSell || 0}</span></p>
-    <p><strong>Range:</strong> ${days[0] || "—"} → ${days[days.length - 1] || "—"}</p>
-    <p class="field-hint">Click a chart bar to open each signal with screenshot and Future Trend Pro checklist (same layout as Trade Journal).</p>
+    ${todayStartLine}
+    <p><strong>Range:</strong> ${rangeLabel}</p>
+    <p class="field-hint">Each BUY/SELL counted <strong>once per chart label</strong> — same direction on many screenshots counts once; a flip needs <strong>3+ captures</strong> in the new direction. Passed = ≥${guidelinePassPercent}% checklist. Click a bar for details.</p>
   `;
 
   if (coins.length === 0) {
@@ -1574,7 +1726,7 @@ function renderLocalAnalyzeSummary(data) {
     </div>
     <p class="field-hint">
       Uses <strong>passed signals only</strong> (≥70% Future Trend Pro checklist on entry screenshot).
-      Each BUY/SELL counted once per <strong>${s.holdCandles || 2}</strong>-candle hold window (same as live auto-trade).
+      Each BUY/SELL counted once per <strong>chart label</strong> (3+ captures must agree before a direction flip counts again).
       Simulates <strong>${s.tradeAmountUsdt || 2} USDT</strong> × <strong>${s.tradeLeverage || 10}x</strong>
       · TP <strong>${s.tradeTpPercent || 30}%</strong> · SL <strong>${s.tradeSlPercent || 30}%</strong>
       · Mode <strong>${s.tradeMode || "long_only"}</strong>
@@ -1584,7 +1736,9 @@ function renderLocalAnalyzeSummary(data) {
 }
 
 function localAnalyzeTableRows(perCoin) {
-  if (perCoin?.length) return perCoin;
+  if (perCoin?.length) {
+    return sortByCoinListOrder(perCoin, (row) => row.coinId);
+  }
   return cachedCoins.map((c) => ({
     coinId: c.id,
     coinName: c.name,
@@ -1740,11 +1894,12 @@ function renderLocalAnalyzeDetail(sim) {
         <span class="${pnlClass(simResult.pnlUsdt)}">${formatUsd(simResult.pnlUsdt)}</span>
       </div>
       <p class="field-hint">Entry ${formatTime(sim.entrySet.at)} @ ${simResult.entryPrice} → exit @ ${simResult.exitPrice} (SS +${simResult.exitStep || "?"})</p>
+      <p class="field-hint"><strong>${(sim.signal || "").toUpperCase()}</strong> is read from the <strong>entry screenshot</strong> only. +1 / +2 / +3 show later charts for TP/SL — not the entry signal.</p>
     </div>
 
     <div class="local-forward-grid">
-      <div class="local-ss-card">
-        <h4>Entry screenshot</h4>
+      <div class="local-ss-card local-ss-card-entry">
+        <h4>Entry screenshot · signal source</h4>
         <img src="${sim.entrySet.screenshotUrl}?t=${encodeURIComponent(sim.entrySet.at)}" alt="Entry" />
         <p>Price: <strong>${sim.entrySet.price}</strong></p>
       </div>
@@ -1952,7 +2107,7 @@ function renderCompareView() {
       return `
         <article class="compare-card">
           <div class="compare-card-header">
-            <strong>${coin.name}${renderTitleAnalyzeStatus(coin, { signalAnalysis: null, chartSignal: coin.chartSignal })}</strong>
+            <strong>${coin.name}${renderTitleCoinStatus(coin, { running: false, progress: null, signalAnalysis: null, chartSignal: coin.chartSignal })}</strong>
             <div class="card-meta-row">
               <span class="card-symbol">${coin.symbol}</span>
               ${renderAlertBadges(coin.alert)}
@@ -1960,6 +2115,7 @@ function renderCompareView() {
           </div>
           <div class="compare-card-image ${signalHighlightClass(coin.chartSignal)}">
             <img class="ss-thumb" src="${src}" data-full-src="${src}" data-caption="${coin.name} (${coin.symbol})" alt="${coin.name}" />
+            ${renderSignalScanOverlay(coin.chartSignal)}
           </div>
         </article>
       `;
@@ -2003,6 +2159,95 @@ function updateAutoRefreshUI(enabled, intervalMs) {
     : `Auto-refresh: stopped`;
 }
 
+let lastStatusForCountdown = null;
+let nextCaptureTimer = null;
+
+function formatCountdown(ms) {
+  if (ms <= 0) return "now";
+  const sec = Math.ceil(ms / 1000);
+  if (sec < 60) return `${sec}s`;
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return s ? `${m}m ${s}s` : `${m}m`;
+}
+
+function updateNextCaptureCountdown(state, settings) {
+  lastStatusForCountdown = { state, settings };
+  if (!nextCaptureCountdownEl) return;
+
+  if (state.running) {
+    nextCaptureCountdownEl.textContent = " · Capturing now…";
+    return;
+  }
+  if (state.signalAnalysis?.running) {
+    nextCaptureCountdownEl.textContent = " · Analyzing…";
+    return;
+  }
+
+  const enabled = state.autoRefreshEnabled ?? settings?.autoRefreshEnabled;
+  if (!enabled) {
+    nextCaptureCountdownEl.textContent = "";
+    return;
+  }
+
+  const nextAt = state.nextCaptureAt
+    ? new Date(state.nextCaptureAt).getTime()
+    : null;
+
+  if (nextAt) {
+    const remaining = nextAt - Date.now();
+    nextCaptureCountdownEl.textContent =
+      remaining <= 0
+        ? " · Next capture due…"
+        : ` · Next capture in ${formatCountdown(remaining)}`;
+    return;
+  }
+
+  const interval = settings?.autoRefreshMs || currentSettings.autoRefreshMs || 900000;
+  const lastAt = state.lastRun?.at ? new Date(state.lastRun.at).getTime() : null;
+  if (!lastAt) {
+    nextCaptureCountdownEl.textContent = ` · Next capture in ${formatCountdown(interval)}`;
+    return;
+  }
+
+  const remaining = lastAt + interval - Date.now();
+  nextCaptureCountdownEl.textContent =
+    remaining <= 0
+      ? " · Next capture due…"
+      : ` · Next capture in ${formatCountdown(remaining)}`;
+}
+
+function startNextCaptureCountdownTicker() {
+  if (nextCaptureTimer) return;
+  nextCaptureTimer = setInterval(async () => {
+    if (!lastStatusForCountdown) return;
+
+    const { state, settings } = lastStatusForCountdown;
+    updateNextCaptureCountdown(state, settings);
+
+    const nextAt = state.nextCaptureAt ? new Date(state.nextCaptureAt).getTime() : null;
+    const overdue =
+      nextAt != null &&
+      nextAt - Date.now() <= 0 &&
+      !state.running &&
+      !state.signalAnalysis?.running;
+
+    if (!overdue) return;
+
+    try {
+      const data = await fetchStatus();
+      lastStatusForCountdown = { state: data, settings: data.settings };
+      updateNextCaptureCountdown(data, data.settings);
+      if (data.running || data.signalAnalysis?.running) {
+        startStatusPoll();
+        await pollCaptureStatus();
+      }
+    } catch {
+      // Best-effort sync when countdown is due.
+    }
+  }, 1000);
+}
+
 function updateStatusUI(state, settings) {
   if (state.signalAnalysis?.running) {
     setBadge("Analyzing charts...", "running");
@@ -2023,7 +2268,16 @@ function updateStatusUI(state, settings) {
     refreshGroupBtn.disabled = activeGroup === "all";
   }
 
-  lastRunEl.textContent = `Last update: ${formatTime(state.lastRun?.at)} (${state.lastRun?.trigger || "—"})`;
+  if (lastRunTextEl) {
+    const errNote = state.error ? ` · Capture error` : "";
+    lastRunTextEl.textContent = `Last update: ${formatTime(state.lastRun?.at)} (${state.lastRun?.trigger || "—"})${errNote}`;
+  }
+  if (state.error && nextCaptureCountdownEl && !state.running && !state.signalAnalysis?.running) {
+    nextCaptureCountdownEl.textContent = ` · ${state.error.split("\n")[0]}`;
+    nextCaptureCountdownEl.title = state.error;
+  } else {
+    updateNextCaptureCountdown(state, settings);
+  }
   if (settings) applySettings(settings);
 }
 
@@ -2115,6 +2369,8 @@ async function pollCaptureStatus() {
         lastRun: data.lastRun,
         error: data.error,
         signalAnalysis: data.signalAnalysis,
+        nextCaptureAt: data.nextCaptureAt,
+        autoRefreshEnabled: data.autoRefreshEnabled,
       },
       data.settings
     );
@@ -2145,14 +2401,25 @@ async function pollCaptureStatus() {
     lastProgressKey = "";
     lastSignalAnalysisKey = "";
 
-    lastProgressKey = "";
     if (captureAt && captureAt !== wasRendering) {
       await loadDashboardImages(captureAt, data);
       if (currentView === "compare") renderCompareView();
-      stopStatusPoll();
-    } else if (!captureAt) {
-      stopStatusPoll();
+    } else {
+      const dash = await fetchDashboard();
+      cachedCoins = dash.coins;
+      renderDashboardGrid(
+        dash.coins,
+        {
+          running: false,
+          progress: null,
+          signalAnalysis: data.signalAnalysis,
+          lastResults: dash.state?.lastResults || data.lastResults || [],
+          error: data.error,
+        },
+        captureAt || lastRenderedAt
+      );
     }
+    stopStatusPoll();
   } catch {
     setBadge("Offline", "error");
     stopStatusPoll();
@@ -2186,11 +2453,19 @@ function startAutoWatch() {
         return;
       }
 
+      updateStatusUI(
+        {
+          running: false,
+          lastRun: data.lastRun,
+          error: data.error,
+          signalAnalysis: data.signalAnalysis,
+          nextCaptureAt: data.nextCaptureAt,
+          autoRefreshEnabled: data.autoRefreshEnabled,
+        },
+        data.settings
+      );
+
       if (captureAt && captureAt !== lastRenderedAt) {
-        updateStatusUI(
-          { running: false, lastRun: data.lastRun, error: data.error },
-          data.settings
-        );
         await loadDashboardImages(captureAt, data);
       }
     } catch {
@@ -2329,10 +2604,12 @@ async function openHistorySet(setId) {
       (set.results || []).map((r) => [r.coin, r])
     );
 
-    const coins = set.coins.map((c) => ({
-      ...c,
-      imageUrl: imageMap[c.id],
-    }));
+    const coins = sortByCoinListOrder(
+      set.coins.map((c) => ({
+        ...c,
+        imageUrl: imageMap[c.id],
+      }))
+    );
 
     renderCoinGrid(historyGrid, coins, { resultMap, cacheBust: set.id, showActions: false });
   } catch {
@@ -2368,6 +2645,7 @@ async function loadCoinsTable() {
       <table>
         <thead>
           <tr>
+            <th>Enabled</th>
             <th>Pin</th>
             <th>Name</th>
             <th>Symbol</th>
@@ -2380,14 +2658,20 @@ async function loadCoinsTable() {
           ${data.coins
             .map(
               (coin) => `
-            <tr data-coin-row="${coin.id}">
+            <tr data-coin-row="${coin.id}" class="${coin.enabled === false ? "coin-row-disabled" : ""}">
+              <td>
+                <label class="coin-enabled-switch" title="${coin.enabled === false ? "Disabled — excluded from capture and analysis" : "Enabled — included in capture and analysis"}">
+                  <input type="checkbox" data-coin-enabled="${coin.id}" ${coin.enabled !== false ? "checked" : ""} />
+                  <span class="coin-enabled-slider"></span>
+                </label>
+              </td>
               <td>
                 <button type="button" class="btn-pin table-pin ${coin.pinned ? "active" : ""}" data-table-pin="${coin.id}" title="Pin">★</button>
               </td>
               <td>${coin.name}</td>
               <td><code>${coin.symbol}</code></td>
               <td>
-                <select class="coin-group-select" data-coin-group="${coin.id}">
+                <select class="coin-group-select" data-coin-group="${coin.id}" ${coin.enabled === false ? "disabled" : ""}>
                   ${groupOptions(coin.id)}
                 </select>
               </td>
@@ -2402,6 +2686,10 @@ async function loadCoinsTable() {
         </tbody>
       </table>
     `;
+
+    coinsTable.querySelectorAll("[data-coin-enabled]").forEach((input) => {
+      input.addEventListener("change", () => toggleCoinEnabled(input.dataset.coinEnabled));
+    });
 
     coinsTable.querySelectorAll("[data-remove]").forEach((btn) => {
       btn.addEventListener("click", () => removeCoin(btn.dataset.remove));
@@ -2627,6 +2915,8 @@ autoRefreshBtn.addEventListener("click", async () => {
     if (!res.ok) throw new Error(data.error);
 
     applySettings(data.settings);
+    const status = await fetchStatus();
+    updateStatusUI(status, status.settings);
   } catch (err) {
     alert(err.message || "Failed to toggle auto-refresh");
   } finally {
@@ -2945,6 +3235,7 @@ async function initDashboard() {
   }
 
   startAutoWatch();
+  startNextCaptureCountdownTicker();
 }
 
 showView("dashboard");

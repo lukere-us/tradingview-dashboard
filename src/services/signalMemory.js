@@ -1,6 +1,9 @@
 /** How long to treat a BUY/SELL as "same" (no repeat trade / keep showing). */
 const HOLD_CANDLES = 2;
 
+/** Consecutive captures with same direction before a flip counts as one chart label. */
+const MIN_EPISODE_RUN = 3;
+
 function candleDurationMs(interval) {
   const key = String(interval || "15");
   const map = {
@@ -51,9 +54,58 @@ function resolveLastActed(previous, chartInterval, now = Date.now()) {
   return { lastActed: signal, lastActedAt: at, holdActive: true };
 }
 
+/**
+ * One chart episode per direction — count again only after BUY↔SELL flips.
+ * Matches visible Future Trend Pro labels (not every screenshot capture).
+ */
+function isSameSignalEpisode(lastSignal, signal) {
+  return Boolean(lastSignal && signal && lastSignal === signal);
+}
+
+/**
+ * Collapse screenshot detections into chart episodes.
+ * - First signal in the window always counts (ongoing label at window start).
+ * - Direction flips count only after MIN_EPISODE_RUN consecutive captures agree.
+ */
+function filterSignalEpisodes(entries, minRun = MIN_EPISODE_RUN) {
+  const sorted = [...entries].sort(
+    (a, b) => new Date(a.at).getTime() - new Date(b.at).getTime()
+  );
+  const kept = [];
+  let lastKeptSignal = null;
+  let index = 0;
+
+  while (index < sorted.length) {
+    const signal = sorted[index].signal;
+    if (signal !== "buy" && signal !== "sell") {
+      index++;
+      continue;
+    }
+
+    let end = index;
+    while (end < sorted.length && sorted[end].signal === signal) end++;
+    const runLen = end - index;
+
+    if (lastKeptSignal === null) {
+      kept.push(sorted[index]);
+      lastKeptSignal = signal;
+    } else if (signal !== lastKeptSignal && runLen >= minRun) {
+      kept.push(sorted[index]);
+      lastKeptSignal = signal;
+    }
+
+    index = end;
+  }
+
+  return kept;
+}
+
 module.exports = {
   HOLD_CANDLES,
+  MIN_EPISODE_RUN,
   candleDurationMs,
   holdDurationMs,
   resolveLastActed,
+  isSameSignalEpisode,
+  filterSignalEpisodes,
 };

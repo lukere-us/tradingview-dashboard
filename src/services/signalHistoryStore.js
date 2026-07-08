@@ -1,10 +1,11 @@
 const fs = require("fs/promises");
 const path = require("path");
-const { holdDurationMs } = require("./signalMemory");
+const { filterSignalEpisodes } = require("./signalMemory");
 const { listSets, HISTORY_DIR } = require("./historyStore");
 const { checkTradeGuidelines, buildTradeAnalysis } = require("./tradeGuidelines");
 const { getSettings } = require("./settingsStore");
-const { getCoins } = require("./coinsStore");
+const { getCoins, getActiveCoins, orderCoinIds } = require("./coinsStore");
+const { analyzeChartSignal, analyzeChartSignals24h, CURRENT_DIR } = require("./chartSignal");
 
 const DATA_DIR = path.join(__dirname, "..", "..", "data");
 const HISTORY_FILE = path.join(DATA_DIR, "signal-history.json");
@@ -54,15 +55,8 @@ async function recordSignalEvent(coinId, result, previous, chartInterval = "15")
   if (signal !== "buy" && signal !== "sell") return null;
 
   const lastActed = previous?.lastActedSignal || null;
-  const lastActedAt = previous?.lastActedAt || null;
-  if (lastActed && lastActedAt && lastActed === signal) {
-    const actedAt = new Date(lastActedAt).getTime();
-    if (
-      Number.isFinite(actedAt) &&
-      Date.now() - actedAt < holdDurationMs(chartInterval)
-    ) {
-      return null;
-    }
+  if (lastActed === signal) {
+    return null;
   }
 
   const at = result.analyzedAt || new Date().toISOString();
@@ -91,6 +85,43 @@ function listDays(days) {
   return out;
 }
 
+/** UTC day keys between two timestamps (for rolling 24h windows). */
+function listDaysInRange(sinceMs, untilMs = Date.now()) {
+  const out = new Set();
+  const cursor = new Date(sinceMs);
+  cursor.setUTCHours(0, 0, 0, 0);
+  const end = new Date(untilMs);
+  while (cursor <= end) {
+    out.add(cursor.toISOString().slice(0, 10));
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  return [...out];
+}
+
+function resolveSignalPeriod(days) {
+  const periodDays = Math.min(30, Math.max(1, Number(days) || 7));
+  if (periodDays <= 1) {
+    const untilMs = Date.now();
+    const sinceMs = untilMs - 24 * 60 * 60 * 1000;
+    return {
+      periodDays,
+      sinceMs,
+      untilMs,
+      rolling24h: true,
+      dayList: listDaysInRange(sinceMs, untilMs),
+    };
+  }
+  const dayList = listDays(periodDays);
+  const sinceMs = new Date(`${dayList[0]}T00:00:00.000Z`).getTime();
+  return {
+    periodDays,
+    sinceMs,
+    untilMs: Date.now(),
+    rolling24h: false,
+    dayList,
+  };
+}
+
 async function loadSetSignalsMap(set) {
   if (set.signals && typeof set.signals === "object") {
     return set.signals;
@@ -106,8 +137,6 @@ async function loadSetSignalsMap(set) {
 }
 
 function countSnapshot(row, day, snap, guidelinesOk) {
-  if (!snap?.isNewSignal) return;
-
   if (snap.signal === "buy") {
     row.days[day].buy += 1;
     row.totals.buy += 1;
@@ -123,6 +152,46 @@ function countSnapshot(row, day, snap, guidelinesOk) {
       row.totals.passedSell += 1;
     }
   }
+}
+
+async function enrichSnapFromImage(coinId, snap, set) {
+  const imagePath = path.join(HISTORY_DIR, set.id, `${coinId}.png`);
+  try {
+    await fs.access(imagePath);
+  } catch {
+    return snap;
+  }
+  const detected = await analyzeChartSignal(imagePath);
+  if (detected.signal !== "buy" && detected.signal !== "sell") {
+    return snap;
+  }
+  return {
+    ...snap,
+    signal: detected.signal,
+    position: detected.position,
+    highlight: detected.highlight,
+    isNewSignal: true,
+  };
+}
+
+async function detectCaptureSignal(coinId, set) {
+  const imagePath = path.join(HISTORY_DIR, set.id, `${coinId}.png`);
+  try {
+    await fs.access(imagePath);
+  } catch {
+    return null;
+  }
+  const detected = await analyzeChartSignal(imagePath);
+  if (detected.signal !== "buy" && detected.signal !== "sell") {
+    return null;
+  }
+  return {
+    signal: detected.signal,
+    position: detected.position,
+    highlight: detected.highlight,
+    isNewSignal: true,
+    analyzedAt: set.at,
+  };
 }
 
 async function resolveSnapGuide(coinId, snap, set, settings) {
@@ -148,14 +217,12 @@ async function resolveSnapGuide(coinId, snap, set, settings) {
 }
 
 async function snapshotGuidelinesOk(coinId, snap, set, settings) {
-  if (!snap?.isNewSignal) return false;
   if (snap.signal !== "buy" && snap.signal !== "sell") return false;
   const guide = await resolveSnapGuide(coinId, snap, set, settings);
   return Boolean(guide.ok);
 }
 
 function matchesSignalKind(snap, guidelinesOk, kind) {
-  if (!snap?.isNewSignal) return false;
   if (kind === "buy") return snap.signal === "buy";
   if (kind === "passedBuy") return snap.signal === "buy" && guidelinesOk;
   if (kind === "sell") return snap.signal === "sell";
@@ -168,6 +235,7 @@ async function buildSignalDetailEntry(coin, snap, set, settings, guide) {
   const chartResult = {
     signal: snap.signal,
     position: snap.position || null,
+    highlight: snap.highlight || null,
     analyzedAt: snap.analyzedAt || set.at,
   };
   const analysis = buildTradeAnalysis({
@@ -202,12 +270,13 @@ async function buildLegacySignalDetail(coin, event, sets, settings, kind) {
 
   if (nearby) {
     const signalsMap = await loadSetSignalsMap(nearby);
-    const snap = signalsMap?.[coin.id] || {
+    const rawSnap = signalsMap?.[coin.id] || {
       signal: event.signal,
       position: event.position,
       isNewSignal: true,
       analyzedAt: event.at,
     };
+    const snap = await enrichSnapFromImage(coin.id, rawSnap, nearby);
     const guide = await resolveSnapGuide(coin.id, snap, nearby, settings);
     const guidelinesOk = Boolean(guide.ok);
     if (!matchesSignalKind(snap, guidelinesOk, kind)) return null;
@@ -240,48 +309,96 @@ async function getSignalBarDetails({ coinId, kind, days = 7 } = {}) {
   const settings = await getSettings();
   const coins = await getCoins();
   const coin = coins.find((c) => c.id === coinId);
-  if (!coin) {
-    return { coinId, coinName: coinId, kind, days, signals: [] };
+  if (!coin || !coin.enabled) {
+    return { coinId, coinName: coin?.name || coinId, kind, days, signals: [] };
   }
 
   const periodDays = Math.min(30, Math.max(1, Number(days) || 7));
-  const dayList = listDays(periodDays);
-  const daySet = new Set(dayList);
-  const sinceMs = new Date(`${dayList[0]}T00:00:00.000Z`).getTime();
+  const period = resolveSignalPeriod(periodDays);
+  const daySet = new Set(period.dayList);
   const sets = (await listSets()).filter(
-    (set) => new Date(set.at).getTime() >= sinceMs
+    (set) => {
+      const t = new Date(set.at).getTime();
+      return t >= period.sinceMs && t <= period.untilMs;
+    }
   );
   const events = await loadHistory();
-  const countedEvents = new Set();
   const signals = [];
 
-  for (const set of sets) {
-    const day = dayKey(set.at);
-    if (!daySet.has(day)) continue;
+  if (period.rolling24h) {
+    const signals24 = await collectCoinSignals24h(coinId, period.untilMs, settings);
+    const imagePath = path.join(CURRENT_DIR, `${coinId}.png`);
 
-    const signalsMap = await loadSetSignalsMap(set);
-    const snap = signalsMap?.[coinId];
-    if (!snap?.isNewSignal) continue;
+    for (const sig of signals24) {
+      const snap = {
+        signal: sig.signal,
+        position: sig.position || null,
+        highlight: sig.signal,
+        analyzedAt: sig.at,
+        approxTime: sig.approxTime || null,
+      };
+      const guide = await checkTradeGuidelines({
+        coinId,
+        signal: sig.signal,
+        settings,
+        imagePath,
+      }).catch(() => null);
+      const guidelinesOk = Boolean(guide?.ok);
+      if (!matchesSignalKind(snap, guidelinesOk, kind)) continue;
 
-    const guide = await resolveSnapGuide(coinId, snap, set, settings);
-    const guidelinesOk = Boolean(guide.ok);
-    if (!matchesSignalKind(snap, guidelinesOk, kind)) continue;
-
-    signals.push(await buildSignalDetailEntry(coin, snap, set, settings, guide));
-
-    for (const event of events) {
-      if (event.coinId !== coinId) continue;
-      if (dayKey(event.at) !== day) continue;
-      const diff = Math.abs(new Date(event.at).getTime() - new Date(set.at).getTime());
-      if (diff <= 120_000) countedEvents.add(eventKey(event));
+      signals.push({
+        id: `${coinId}-24h-${sig.signal}-${sig.at}`,
+        coinId: coin.id,
+        coinName: coin.name,
+        symbol: coin.symbol,
+        signal: sig.signal,
+        at: sig.at,
+        approxTime: sig.approxTime || null,
+        position: sig.position || null,
+        guidelinesOk,
+        guidelinePassPercent: guide?.passStats?.percent ?? null,
+        screenshotUrl: `/screenshots/current/${coin.id}.png`,
+        analysis: buildTradeAnalysis({
+          coinId: coin.id,
+          signal: sig.signal,
+          chartResult: snap,
+          guide,
+          settings,
+        }),
+      });
     }
+
+    signals.sort((a, b) => new Date(b.at) - new Date(a.at));
+
+    return {
+      coinId,
+      coinName: coin.name,
+      symbol: coin.symbol,
+      kind,
+      days: periodDays,
+      rolling24h: period.rolling24h,
+      guidelinePassPercent: 70,
+      signals,
+    };
   }
 
-  const relevant = events.filter((e) => e.coinId === coinId && daySet.has(e.day));
-  for (const event of relevant) {
-    if (countedEvents.has(eventKey(event))) continue;
-    const entry = await buildLegacySignalDetail(coin, event, sets, settings, kind);
-    if (entry) signals.push(entry);
+  const episodes = await collectCoinEpisodes(
+    coinId,
+    sets,
+    period.sinceMs,
+    period.untilMs
+  );
+
+  for (const episode of episodes) {
+    if (!episode.set || !episode.snap) continue;
+
+    const guide = await resolveSnapGuide(coinId, episode.snap, episode.set, settings);
+    const guidelinesOk = Boolean(guide.ok);
+    if (!matchesSignalKind(episode.snap, guidelinesOk, kind)) continue;
+
+    signals.push(
+      await buildSignalDetailEntry(coin, episode.snap, episode.set, settings, guide)
+    );
   }
 
   signals.sort((a, b) => new Date(b.at) - new Date(a.at));
@@ -292,88 +409,180 @@ async function getSignalBarDetails({ coinId, kind, days = 7 } = {}) {
     symbol: coin.symbol,
     kind,
     days: periodDays,
+    rolling24h: period.rolling24h,
     guidelinePassPercent: 70,
     signals,
   };
 }
 
-function eventKey(event) {
-  return `${event.coinId}:${event.at}`;
+/** Rolling 24h: read all text labels from the latest chart image (matches manual count). */
+async function collectCoinSignals24h(coinId, untilMs, settings) {
+  const imagePath = path.join(CURRENT_DIR, `${coinId}.png`);
+  const result = await analyzeChartSignals24h(imagePath, {
+    captureAt: new Date(untilMs).toISOString(),
+    chartInterval: settings?.chartInterval || "15",
+  });
+  return result.signals || [];
+}
+
+function signal24hToEpisode(sig, coinId) {
+  return {
+    at: sig.at,
+    day: dayKey(sig.at),
+    signal: sig.signal,
+    approxTime: sig.approxTime || null,
+    snap: {
+      signal: sig.signal,
+      position: sig.position || null,
+      highlight: sig.signal,
+      isNewSignal: true,
+      analyzedAt: sig.at,
+      approxTime: sig.approxTime || null,
+    },
+    set: null,
+    coinId,
+    source: "chart24h",
+  };
+}
+
+/** Detect from every screenshot, run-dedupe — one count per chart label episode. */
+async function collectCoinEpisodes(coinId, sets, sinceMs, untilMs) {
+  const raw = [];
+
+  for (const set of sets) {
+    const atMs = new Date(set.at).getTime();
+    if (atMs < sinceMs || atMs > untilMs) continue;
+
+    const snap = await detectCaptureSignal(coinId, set);
+    if (!snap) continue;
+
+    const day = dayKey(set.at);
+    raw.push({
+      at: set.at,
+      day,
+      signal: snap.signal,
+      snap,
+      set,
+      coinId,
+      source: "capture",
+    });
+  }
+
+  return filterSignalEpisodes(raw);
+}
+
+async function countEpisodeRow(coinId, episode, row, settings, guidelinesOkOverride = null) {
+  if (episode.set && episode.snap) {
+    const guidelinesOk =
+      guidelinesOkOverride != null
+        ? guidelinesOkOverride
+        : await snapshotGuidelinesOk(
+            coinId,
+            episode.snap,
+            episode.set,
+            settings
+          );
+    countSnapshot(row, episode.day, episode.snap, guidelinesOk);
+    return;
+  }
+
+  if (episode.snap && episode.source === "chart24h") {
+    const guidelinesOk =
+      guidelinesOkOverride != null
+        ? guidelinesOkOverride
+        : false;
+    countSnapshot(row, episode.day, episode.snap, guidelinesOk);
+    return;
+  }
+
+  if (episode.signal === "buy") {
+    row.days[episode.day].buy += 1;
+    row.totals.buy += 1;
+  } else if (episode.signal === "sell") {
+    row.days[episode.day].sell += 1;
+    row.totals.sell += 1;
+  }
 }
 
 async function getSignalStats({ days = 7, coinIds = null } = {}) {
   const settings = await getSettings();
   const events = await loadHistory();
-  const dayList = listDays(days);
-  const daySet = new Set(dayList);
-  const sinceMs = new Date(`${dayList[0]}T00:00:00.000Z`).getTime();
+  const period = resolveSignalPeriod(days);
+  const daySet = new Set(period.dayList);
 
-  const sets = (await listSets()).filter(
-    (set) => new Date(set.at).getTime() >= sinceMs
-  );
+  const sets = (await listSets()).filter((set) => {
+    const t = new Date(set.at).getTime();
+    return t >= period.sinceMs && t <= period.untilMs;
+  });
 
+  const allCoins = await getActiveCoins();
+  const activeIds = new Set(allCoins.map((c) => c.id));
   const coinIdSet = new Set(
-    coinIds && coinIds.length > 0
+    (coinIds && coinIds.length > 0
       ? coinIds
       : [
           ...new Set([
-            ...events.filter((e) => daySet.has(e.day)).map((e) => e.coinId),
+            ...events
+              .filter((e) => {
+                const t = new Date(e.at).getTime();
+                return t >= period.sinceMs && t <= period.untilMs;
+              })
+              .map((e) => e.coinId),
             ...sets.flatMap((s) => (s.coins || []).map((c) => c.id)),
           ]),
-        ]
+        ]).filter((id) => activeIds.has(id))
   );
-
-  const ids = [...coinIdSet].sort();
+  const ids = orderCoinIds([...coinIdSet], allCoins);
   const byCoin = {};
   for (const id of ids) {
-    byCoin[id] = initCoinRow(id, dayList);
+    byCoin[id] = initCoinRow(id, period.dayList);
   }
 
-  const countedEvents = new Set();
-
-  for (const set of sets) {
-    const day = dayKey(set.at);
-    if (!daySet.has(day)) continue;
-
-    const signals = await loadSetSignalsMap(set);
-    if (!signals) continue;
-
-    for (const [coinId, snap] of Object.entries(signals)) {
-      const row = byCoin[coinId];
-      if (!row) continue;
-      if (!snap?.isNewSignal) continue;
-
-      const guidelinesOk = await snapshotGuidelinesOk(coinId, snap, set, settings);
-      countSnapshot(row, day, snap, guidelinesOk);
-
-      // Only suppress legacy events that were already counted from this capture.
-      for (const event of events) {
-        if (event.coinId !== coinId) continue;
-        if (dayKey(event.at) !== day) continue;
-        const diff = Math.abs(new Date(event.at).getTime() - new Date(set.at).getTime());
-        if (diff <= 120_000) countedEvents.add(eventKey(event));
+  for (const coinId of ids) {
+    if (period.rolling24h) {
+      const signals24 = await collectCoinSignals24h(
+        coinId,
+        period.untilMs,
+        settings
+      );
+      for (const sig of signals24) {
+        const episode = signal24hToEpisode(sig, coinId);
+        if (!daySet.has(episode.day)) continue;
+        const guide = await checkTradeGuidelines({
+          coinId,
+          signal: sig.signal,
+          settings,
+          imagePath: path.join(CURRENT_DIR, `${coinId}.png`),
+        }).catch(() => null);
+        await countEpisodeRow(
+          coinId,
+          episode,
+          byCoin[coinId],
+          settings,
+          Boolean(guide?.ok)
+        );
       }
+      continue;
     }
-  }
 
-  const relevant = events.filter((e) => daySet.has(e.day));
-  for (const event of relevant) {
-    if (countedEvents.has(eventKey(event))) continue;
-
-    const row = byCoin[event.coinId];
-    if (!row) continue;
-
-    if (event.signal === "buy") {
-      row.days[event.day].buy += 1;
-      row.totals.buy += 1;
-    } else if (event.signal === "sell") {
-      row.days[event.day].sell += 1;
-      row.totals.sell += 1;
+    const episodes = await collectCoinEpisodes(
+      coinId,
+      sets,
+      period.sinceMs,
+      period.untilMs
+    );
+    for (const episode of episodes) {
+      if (!daySet.has(episode.day)) continue;
+      await countEpisodeRow(coinId, episode, byCoin[coinId], settings);
     }
   }
 
   return {
-    days: dayList,
+    days: period.dayList,
+    periodDays: period.periodDays,
+    rolling24h: period.rolling24h,
+    sinceAt: new Date(period.sinceMs).toISOString(),
+    untilAt: new Date(period.untilMs).toISOString(),
     coins: ids.map((id) => byCoin[id]),
     totals: {
       buy: ids.reduce((n, id) => n + byCoin[id].totals.buy, 0),

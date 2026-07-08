@@ -1,7 +1,8 @@
+require("./puppeteer-env");
 const express = require("express");
 const path = require("path");
 const { captureAllCoins } = require("./services/screenshotter");
-const { getCoins, addCoin, updateCoin, removeCoin, GROUPS } = require("./services/coinsStore");
+const { getCoins, getActiveCoins, addCoin, updateCoin, removeCoin, GROUPS } = require("./services/coinsStore");
 const {
   archiveScreenshotSet,
   listSets,
@@ -77,6 +78,53 @@ let settings = {
   autoRefreshEnabled: true,
 };
 let autoRefreshTimer = null;
+let nextCaptureAt = null;
+
+function computeNextCaptureDelayMs() {
+  if (!settings.autoRefreshEnabled) return null;
+  const interval = autoRefreshMs(settings);
+  const base = captureState.lastRun?.at
+    ? new Date(captureState.lastRun.at).getTime()
+    : Date.now();
+  return Math.max(0, base + interval - Date.now());
+}
+
+function scheduleNextAutoCapture() {
+  if (autoRefreshTimer) {
+    clearTimeout(autoRefreshTimer);
+    autoRefreshTimer = null;
+  }
+
+  if (!settings.autoRefreshEnabled) {
+    nextCaptureAt = null;
+    return;
+  }
+
+  const delay = computeNextCaptureDelayMs();
+  nextCaptureAt = new Date(Date.now() + delay).toISOString();
+
+  autoRefreshTimer = setTimeout(() => {
+    triggerAutoCapture();
+  }, delay);
+}
+
+function triggerAutoCapture() {
+  if (!settings.autoRefreshEnabled) {
+    nextCaptureAt = null;
+    return;
+  }
+
+  if (captureState.running || captureState.signalAnalysis?.running) {
+    autoRefreshTimer = setTimeout(triggerAutoCapture, 2000);
+    nextCaptureAt = new Date(Date.now() + 2000).toISOString();
+    return;
+  }
+
+  console.log("Auto-refresh: capturing screenshots...");
+  runCapture("auto").catch((err) => {
+    console.error("Auto capture failed:", err.message);
+  });
+}
 
 let captureState = {
   running: false,
@@ -95,6 +143,8 @@ function statusPayload() {
     error: captureState.error,
     progress: captureState.progress,
     signalAnalysis: captureState.signalAnalysis,
+    nextCaptureAt,
+    autoRefreshEnabled: settings.autoRefreshEnabled,
   };
 }
 
@@ -103,25 +153,13 @@ function settingsPayload() {
 }
 
 function scheduleAutoRefresh() {
-  if (autoRefreshTimer) {
-    clearInterval(autoRefreshTimer);
-    autoRefreshTimer = null;
-  }
-
-  const interval = autoRefreshMs(settings);
-  autoRefreshTimer = setInterval(() => {
-    if (settings.autoRefreshEnabled && !captureState.running && !captureState.signalAnalysis?.running) {
-      console.log("Auto-refresh: capturing screenshots...");
-      runCapture("auto").catch((err) => {
-        console.error("Auto capture failed:", err.message);
-      });
-    }
-  }, interval);
+  scheduleNextAutoCapture();
 }
 
 async function runCapture(trigger = "manual", options = {}) {
   const coinId = options.coinId || null;
   const group = options.group || null;
+  const isPartial = Boolean(coinId || (group && group !== "all"));
 
   if (captureState.running || captureState.signalAnalysis?.running) {
     return { skipped: true, reason: "Capture already in progress" };
@@ -133,24 +171,31 @@ async function runCapture(trigger = "manual", options = {}) {
 
   try {
     const allCoins = await getCoins();
+    const activeCoins = allCoins.filter((c) => c.enabled);
 
     let captureList;
     if (coinId) {
-      if (!allCoins.some((c) => c.id === coinId)) {
+      const coin = allCoins.find((c) => c.id === coinId);
+      if (!coin) {
         throw new Error(`Coin "${coinId}" not found`);
       }
-      captureList = allCoins.filter((c) => c.id === coinId);
+      if (!coin.enabled) {
+        throw new Error(`Coin "${coinId}" is disabled`);
+      }
+      captureList = [coin];
     } else if (group && group !== "all") {
-      captureList = allCoins.filter((c) => c.group === group);
+      captureList = activeCoins.filter((c) => c.group === group);
       if (captureList.length === 0) {
-        throw new Error(`No coins in group "${group}"`);
+        throw new Error(`No enabled coins in group "${group}"`);
       }
     } else {
-      captureList = allCoins;
+      captureList = activeCoins;
+      if (captureList.length === 0) {
+        throw new Error("No enabled coins to capture");
+      }
     }
 
     const coinIds = captureList.map((c) => c.id);
-    const isPartial = Boolean(coinId || (group && group !== "all"));
 
     captureState.progress = {
       total: captureList.length,
@@ -257,6 +302,9 @@ async function runCapture(trigger = "manual", options = {}) {
   } finally {
     captureState.running = false;
     captureState.progress = null;
+    if (!isPartial) {
+      scheduleNextAutoCapture();
+    }
   }
 }
 
@@ -367,7 +415,7 @@ app.get("/api/local-trade-analysis", async (req, res) => {
 app.get("/api/signal-stats", async (req, res) => {
   try {
     const days = Math.min(30, Math.max(1, Number(req.query.days) || 1));
-    const coins = await getCoins();
+    const coins = await getActiveCoins();
     const stats = await getSignalStats({
       days,
       coinIds: coins.map((c) => c.id),
@@ -376,6 +424,9 @@ app.get("/api/signal-stats", async (req, res) => {
     const coinMap = Object.fromEntries(coins.map((c) => [c.id, c]));
     res.json({
       days: stats.days,
+      rolling24h: stats.rolling24h,
+      sinceAt: stats.sinceAt,
+      untilAt: stats.untilAt,
       totals: stats.totals,
       guidelinePassPercent: stats.guidelinePassPercent ?? 70,
       coins: stats.coins.map((row) => ({
@@ -409,21 +460,28 @@ app.get("/api/signal-details", async (req, res) => {
 
 app.get("/api/coins", async (_req, res) => {
   try {
-    const coins = await getCoins();
-    await refreshPrices(coins, { rotatePrevious: false }).catch(() => {});
-    const alerts = await getAlerts(coins, settings.alertThresholdPercent ?? 3);
+    const allCoins = await getCoins();
+    const activeCoins = allCoins.filter((c) => c.enabled);
+    await refreshPrices(activeCoins, { rotatePrevious: false }).catch(() => {});
+    const alerts = await getAlerts(activeCoins, settings.alertThresholdPercent ?? 3);
     const signals = await getSignals();
 
     res.json({
-      coins: coins.map((c) => ({
+      coins: allCoins.map((c) => ({
         id: c.id,
         name: c.name,
         symbol: c.symbol,
         group: c.group,
         pinned: c.pinned,
+        enabled: c.enabled,
         imageUrl: `/screenshots/current/${c.id}.png`,
         alert: alerts[c.id] || null,
-        chartSignal: signals[c.id] || { signal: "none", position: null, highlight: null },
+        chartSignal: signals[c.id] || {
+          signal: "none",
+          position: null,
+          highlight: null,
+          markers: null,
+        },
       })),
       groups: GROUPS,
       state: statusPayload(),
@@ -522,6 +580,7 @@ app.post("/api/auto-refresh", async (req, res) => {
   }
 
   settings = await updateSettings({ autoRefreshEnabled: enabled });
+  scheduleNextAutoCapture();
   console.log(`Auto-refresh ${enabled ? "started" : "stopped"}`);
   res.json({ settings: settingsPayload() });
 });
@@ -572,7 +631,7 @@ app.listen(PORT, async () => {
 
   scheduleAutoRefresh();
 
-  const coins = await getCoins();
+  const coins = await getActiveCoins();
   if (coins.length > 0) {
     runSignalAnalysis(coins.map((c) => c.id)).catch((err) => {
       console.error("Initial signal scan failed:", err.message);

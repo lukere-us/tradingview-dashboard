@@ -340,6 +340,11 @@ body {
   margin-bottom: 1.5rem;
 }
 
+.next-capture-countdown {
+  color: #7eb8ff;
+  margin-left: 0.35rem;
+}
+
 .grid {
   display: grid;
   grid-template-columns: repeat(var(--grid-cols, 3), minmax(0, 1fr));
@@ -487,6 +492,14 @@ body {
   color: #9aa0a6;
 }
 
+.card-analyze-status.captured {
+  color: #81c784;
+}
+
+.card-analyze-status.error {
+  color: #ef5350;
+}
+
 .card-analyze-status.none {
   color: #6b7280;
 }
@@ -527,6 +540,75 @@ body {
   height: 100%;
   object-fit: cover;
   display: block;
+}
+
+.signal-scan-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.signal-scan-band {
+  position: absolute;
+  box-sizing: border-box;
+  border: 2px dashed rgba(91, 156, 246, 0.75);
+  background: rgba(41, 98, 255, 0.07);
+}
+
+.signal-scan-last3 {
+  position: absolute;
+  box-sizing: border-box;
+  border: 2px solid rgba(249, 168, 37, 0.9);
+  background: rgba(249, 168, 37, 0.07);
+}
+
+.signal-scan-label {
+  position: absolute;
+  box-sizing: border-box;
+  border-width: 2px;
+  border-style: solid;
+}
+
+.signal-scan-label.buy.accepted {
+  border-color: rgba(0, 230, 118, 0.95);
+  background: rgba(0, 230, 118, 0.12);
+  box-shadow: 0 0 0 1px rgba(0, 230, 118, 0.35);
+}
+
+.signal-scan-label.sell.accepted {
+  border-color: rgba(255, 23, 68, 0.95);
+  background: rgba(255, 23, 68, 0.12);
+  box-shadow: 0 0 0 1px rgba(255, 23, 68, 0.35);
+}
+
+.signal-scan-label.rejected {
+  border-color: rgba(249, 168, 37, 0.9);
+  border-style: dashed;
+  background: rgba(249, 168, 37, 0.08);
+}
+
+.signal-scan-legend {
+  position: absolute;
+  left: 6px;
+  bottom: 6px;
+  z-index: 3;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.65rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #f9a825;
+  background: rgba(15, 17, 23, 0.82);
+  border: 1px solid rgba(249, 168, 37, 0.45);
+}
+
+.compare-card-image {
+  position: relative;
+}
+
+.compare-card-image .signal-scan-overlay {
+  border-radius: 0;
 }
 
 .card-loading,
@@ -1908,6 +1990,59 @@ body {
   border-radius: 6px;
   padding: 0.35rem 0.5rem;
   font-size: 0.85rem;
+}
+
+.coins-table tr.coin-row-disabled td {
+  opacity: 0.55;
+}
+
+.coin-enabled-switch {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  width: 42px;
+  height: 22px;
+  cursor: pointer;
+}
+
+.coin-enabled-switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+  position: absolute;
+}
+
+.coin-enabled-slider {
+  position: absolute;
+  inset: 0;
+  background: #3a3f4b;
+  border-radius: 999px;
+  transition: background 0.15s ease;
+}
+
+.coin-enabled-slider::before {
+  content: "";
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  left: 3px;
+  top: 3px;
+  background: #fff;
+  border-radius: 50%;
+  transition: transform 0.15s ease;
+}
+
+.coin-enabled-switch input:checked + .coin-enabled-slider {
+  background: #4caf50;
+}
+
+.coin-enabled-switch input:checked + .coin-enabled-slider::before {
+  transform: translateX(20px);
+}
+
+.coin-enabled-switch input:focus-visible + .coin-enabled-slider {
+  outline: 2px solid #5b9cf6;
+  outline-offset: 2px;
 }
 
 .table-pin {

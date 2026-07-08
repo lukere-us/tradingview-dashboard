@@ -4,7 +4,7 @@ const {
   fetchIncomeHistory,
   fetchOpenPositions,
 } = require("./binanceTrade");
-const { getCoins } = require("./coinsStore");
+const { getActiveCoins } = require("./coinsStore");
 
 function dayKey(ms) {
   return new Date(ms).toISOString().slice(0, 10);
@@ -163,7 +163,7 @@ function localTradeStats(trades) {
 async function getPnLReport(settings, { days = 30 } = {}) {
   const periodDays = Math.min(90, Math.max(1, Number(days) || 30));
   const startTime = Date.now() - periodDays * 24 * 60 * 60 * 1000;
-  const coins = await getCoins();
+  const coins = await getActiveCoins();
   const trades = await listTrades(200);
   const periodTrades = trades.filter((t) => new Date(t.at).getTime() >= startTime);
   const local = localTradeStats(periodTrades);

@@ -32,15 +32,45 @@ async function getSignals() {
   const settings = await getSettings().catch(() => ({ chartInterval: "15" }));
   const interval = settings.chartInterval || "15";
   const now = Date.now();
+  const coinIds = Object.keys(signals);
 
-  // Expire hold memory for readers; never override live `signal` for display.
+  const liveByCoin = {};
+  await Promise.all(
+    coinIds.map(async (coinId) => {
+      try {
+        liveByCoin[coinId] = await analyzeCoinSignal(coinId);
+      } catch {
+        liveByCoin[coinId] = {
+          signal: "none",
+          position: null,
+          highlight: null,
+        };
+      }
+    })
+  );
+
   const out = {};
-  for (const [coinId, row] of Object.entries(signals)) {
-    const { lastActed, lastActedAt, holdActive } = resolveLastActed(row, interval, now);
+  for (const coinId of coinIds) {
+    const row = signals[coinId];
+    const live = liveByCoin[coinId] || {
+      signal: "none",
+      position: null,
+      highlight: null,
+    };
+    const { lastActed, lastActedAt, holdActive } = resolveLastActed(
+      row,
+      interval,
+      now
+    );
     out[coinId] = {
       ...row,
+      signal: live.signal || "none",
+      position: live.position ?? null,
+      highlight: live.highlight ?? null,
+      markers: live.markers ?? null,
+      analyzedAt: live.analyzedAt || row.analyzedAt,
       lastActedSignal: lastActed,
-      lastActedAt: lastActedAt,
+      lastActedAt,
       holdActive,
     };
   }
@@ -54,15 +84,16 @@ async function updateSignalsForCoins(coinIds, onProgress, options = {}) {
   const interval = settings.chartInterval || "15";
   const coins = await getCoins();
   const coinMap = Object.fromEntries(coins.map((c) => [c.id, c]));
+  const activeCoinIds = coinIds.filter((id) => coinMap[id]?.enabled !== false);
   const captureSnapshots = {};
 
-  for (let i = 0; i < coinIds.length; i++) {
-    const coinId = coinIds[i];
+  for (let i = 0; i < activeCoinIds.length; i++) {
+    const coinId = activeCoinIds[i];
     onProgress?.({
       phase: "start",
       coinId,
       current: i + 1,
-      total: coinIds.length,
+      total: activeCoinIds.length,
     });
 
     const previous = current[coinId] || null;
@@ -96,6 +127,8 @@ async function updateSignalsForCoins(coinIds, onProgress, options = {}) {
     captureSnapshots[coinId] = {
       signal: result.signal || "none",
       position: result.position || null,
+      highlight: result.highlight || null,
+      markers: result.markers || null,
       analyzedAt: result.analyzedAt,
       isNewSignal: Boolean(event),
       guidelinesOk: guide ? guide.ok : null,
@@ -210,7 +243,7 @@ async function updateSignalsForCoins(coinIds, onProgress, options = {}) {
       coinId,
       result: current[coinId],
       current: i + 1,
-      total: coinIds.length,
+      total: activeCoinIds.length,
     });
   }
 

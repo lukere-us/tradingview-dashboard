@@ -22,11 +22,20 @@ function isLoggedInFromCookies(cookies) {
 }
 
 function getBrowserLaunchOptions({ headless = true } = {}) {
-  return {
+  const options = {
     headless,
     userDataDir: PROFILE_DIR,
     args: [...BASE_ARGS, "--window-size=1280,720"],
   };
+
+  try {
+    const execPath = puppeteer.executablePath();
+    if (execPath) options.executablePath = execPath;
+  } catch {
+    // Fall back to Puppeteer's default browser resolution.
+  }
+
+  return options;
 }
 
 function isLoginBrowserOpen() {
