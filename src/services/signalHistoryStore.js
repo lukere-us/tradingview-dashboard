@@ -54,7 +54,7 @@ async function recordSignalEvent(coinId, result, previous, chartInterval = "15")
   const signal = result?.signal;
   if (signal !== "buy" && signal !== "sell") return null;
 
-  const lastActed = previous?.lastActedSignal || null;
+  const lastActed = previous?.lastActedSignal ?? previous?.lastTradedSignal ?? null;
   if (lastActed === signal) {
     return null;
   }

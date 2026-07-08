@@ -1684,6 +1684,17 @@ body {
   margin: 0.35rem 0 0;
 }
 
+.trade-detail-header-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+#tradeRerunStatus.ok {
+  color: #81c784;
+}
+
 .trade-detail-title {
   display: flex;
   align-items: center;

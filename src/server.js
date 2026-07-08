@@ -20,6 +20,7 @@ const {
   testBinanceConnection,
   listTrades,
   getTradeById,
+  rerunTradeById,
 } = require("./services/binanceTrade");
 const {
   getSessionStatus,
@@ -391,6 +392,22 @@ app.get("/api/trades/:id", async (req, res) => {
   }
 });
 
+app.post("/api/trades/:id/rerun", async (req, res) => {
+  if (captureState.running) {
+    return res.status(409).json({ error: "Screenshot capture in progress — try again shortly" });
+  }
+
+  try {
+    const trade = await rerunTradeById(req.params.id, settings);
+    if (trade?.skipped) {
+      return res.status(400).json({ error: trade.reason || "Trade was skipped", trade });
+    }
+    res.json({ trade });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
 app.get("/api/pnl-report", async (req, res) => {
   try {
     const days = Math.min(90, Math.max(1, Number(req.query.days) || 30));
@@ -633,10 +650,6 @@ app.listen(PORT, async () => {
 
   const coins = await getActiveCoins();
   if (coins.length > 0) {
-    runSignalAnalysis(coins.map((c) => c.id)).catch((err) => {
-      console.error("Initial signal scan failed:", err.message);
-    });
-
     console.log("Starting initial screenshot capture...");
     runCapture("startup").catch((err) => {
       console.error("Startup capture failed:", err.message);

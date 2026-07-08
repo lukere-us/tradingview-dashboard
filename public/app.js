@@ -1234,15 +1234,24 @@ function renderTradeJournalDetail(trade) {
   const analysis = trade.analysis || {};
   const chart = analysis.chartSignal || {};
   const signalLabel = (trade.signal || "—").toUpperCase();
+  const canRerun = trade.signal === "buy" || trade.signal === "sell";
 
   tradeJournalDetail.innerHTML = `
     <div class="trade-detail-header">
-      <button type="button" class="btn btn-secondary btn-sm" id="tradeDetailBackBtn">← Back to list</button>
+      <div class="trade-detail-header-actions">
+        <button type="button" class="btn btn-secondary btn-sm" id="tradeDetailBackBtn">← Back to list</button>
+        ${
+          canRerun
+            ? `<button type="button" class="btn btn-primary btn-sm" id="tradeRunAgainBtn">Run Trade Again</button>`
+            : ""
+        }
+      </div>
       <div class="trade-detail-title">
         <h3>${trade.coinName || trade.coinId} · ${signalLabel}</h3>
         <span class="trade-status-badge ${tradeStatusClass(trade.status)}">${tradeStatusLabel(trade.status)}</span>
       </div>
       <p class="field-hint">${formatTime(trade.at)} · ${trade.symbol || ""}</p>
+      <p id="tradeRerunStatus" class="field-hint hidden"></p>
     </div>
 
     ${renderGuidelineAnalysisBody(trade)}
@@ -1268,7 +1277,48 @@ function renderTradeJournalDetail(trade) {
     tradeJournalPagination?.classList.remove("hidden");
   });
 
+  document.getElementById("tradeRunAgainBtn")?.addEventListener("click", () => {
+    runTradeAgain(trade.id);
+  });
+
   bindSignalDetailImages(tradeJournalDetail, trade);
+}
+
+async function runTradeAgain(tradeId) {
+  const btn = document.getElementById("tradeRunAgainBtn");
+  const statusEl = document.getElementById("tradeRerunStatus");
+  if (btn) btn.disabled = true;
+  if (statusEl) {
+    statusEl.textContent = "Placing trade on Binance…";
+    statusEl.classList.remove("hidden", "text-error", "ok");
+  }
+
+  try {
+    const res = await fetch(`/api/trades/${encodeURIComponent(tradeId)}/rerun`, {
+      method: "POST",
+    });
+    const data = await parseJsonResponse(res);
+    if (!res.ok) throw new Error(data.error);
+
+    selectedTradeId = data.trade?.id || tradeId;
+    await loadTradeJournal();
+
+    const msg = document.getElementById("tradeRerunStatus");
+    if (msg) {
+      msg.textContent = "Trade placed successfully.";
+      msg.classList.add("ok");
+      msg.classList.remove("hidden", "text-error");
+    }
+  } catch (err) {
+    if (statusEl) {
+      statusEl.textContent = err.message || "Failed to run trade";
+      statusEl.classList.add("text-error");
+      statusEl.classList.remove("hidden", "ok");
+    } else {
+      alert(err.message || "Failed to run trade");
+    }
+    if (btn) btn.disabled = false;
+  }
 }
 
 function tradeJournalPeriodDays() {

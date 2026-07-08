@@ -103,8 +103,8 @@ async function updateSignalsForCoins(coinIds, onProgress, options = {}) {
     );
     const previousForRecord = {
       ...previous,
-      lastActedSignal: lastActed,
-      lastActedAt,
+      lastActedSignal: lastActed ?? previous?.lastTradedSignal ?? null,
+      lastActedAt: lastActedAt ?? previous?.lastTradedAt ?? null,
     };
 
     const result = await analyzeCoinSignal(coinId);
@@ -163,6 +163,10 @@ async function updateSignalsForCoins(coinIds, onProgress, options = {}) {
 
     if (event && (event.signal === "buy" || event.signal === "sell")) {
       const coin = coinMap[coinId];
+      const lastEntered =
+        previous?.lastTradedSignal ?? previous?.lastActedSignal ?? null;
+      const alreadyTraded = lastEntered === event.signal;
+
       console.log(
         `New signal (${coinId}): ${event.signal} (hold ${HOLD_CANDLES} candles)`
       );
@@ -188,6 +192,10 @@ async function updateSignalsForCoins(coinIds, onProgress, options = {}) {
               guidelines: guide.status,
               analysis,
             }).catch(() => {});
+          } else if (alreadyTraded) {
+            console.log(
+              `Auto-trade skipped (${coinId}): already entered ${event.signal} — no duplicate on restart`
+            );
           } else {
             const trade = await executeSignalTrade({
               coin,
@@ -206,6 +214,8 @@ async function updateSignalsForCoins(coinIds, onProgress, options = {}) {
                 analysis,
               }).catch(() => {});
             } else if (trade?.status === "ok") {
+              current[coinId].lastTradedSignal = event.signal;
+              current[coinId].lastTradedAt = new Date().toISOString();
               console.log(`Auto-trade placed (${coinId} ${event.signal})`);
             }
           }

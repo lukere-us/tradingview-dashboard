@@ -21,6 +21,24 @@ function sign(query, secret) {
   return crypto.createHmac("sha256", secret).update(query).digest("hex");
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isBinanceApiError(data) {
+  if (data?.code == null) return false;
+  const code = Number(data.code);
+  return Number.isFinite(code) && code < 0;
+}
+
+function formatTriggerPrice(price) {
+  const n = Number(price);
+  if (!Number.isFinite(n) || n <= 0) {
+    throw new Error(`Invalid trigger price: ${price}`);
+  }
+  return String(n);
+}
+
 function baseUrl(settings) {
   return settings.binanceTestnet ? TESTNET : MAINNET;
 }
@@ -60,7 +78,7 @@ async function signedRequest(settings, method, endpoint, params = {}) {
     throw new Error(`Binance invalid response (${res.status})`);
   }
 
-  if (!res.ok || data.code) {
+  if (!res.ok || isBinanceApiError(data)) {
     throw new Error(formatBinanceError(data, settings));
   }
 
@@ -102,7 +120,7 @@ async function publicGet(settings, endpoint, params = {}) {
   const url = `${baseUrl(settings)}${endpoint}${query ? `?${query}` : ""}`;
   const res = await fetch(url);
   const data = await res.json();
-  if (!res.ok || data.code) {
+  if (!res.ok || isBinanceApiError(data)) {
     throw new Error(data.msg || `Binance public error (${res.status})`);
   }
   return data;
@@ -162,6 +180,28 @@ async function getPositionAmt(settings, symbol) {
   return Number(row?.positionAmt || 0);
 }
 
+async function getOpenPosition(settings, symbol, { side, timeoutMs = 8000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const rows = await signedRequest(settings, "GET", "/fapi/v2/positionRisk", { symbol });
+    const row = Array.isArray(rows) ? rows.find((r) => r.symbol === symbol) : rows;
+    const amt = Number(row?.positionAmt || 0);
+    const entryPrice = Number(row?.entryPrice || 0);
+
+    if (side === "long" && amt > 0 && entryPrice > 0) {
+      return { side: "long", quantity: amt, entryPrice };
+    }
+    if (side === "short" && amt < 0 && entryPrice > 0) {
+      return { side: "short", quantity: Math.abs(amt), entryPrice };
+    }
+
+    await sleep(250);
+  }
+
+  throw new Error(`Timed out waiting for ${side} position on ${symbol}`);
+}
+
 async function fetchAccountSnapshot(settings) {
   return signedRequest(settings, "GET", "/fapi/v2/account");
 }
@@ -187,28 +227,32 @@ async function fetchIncomeHistory(settings, { startTime, endTime, limit = 1000 }
 }
 
 async function ensureLeverage(settings, symbol) {
+  const leverage = Math.round(Number(settings.tradeLeverage) || 1);
+
   try {
     await signedRequest(settings, "POST", "/fapi/v1/leverage", {
       symbol,
-      leverage: settings.tradeLeverage,
+      leverage,
     });
   } catch (err) {
-    // Ignore if already set or not changeable.
     if (!/No need to change/i.test(err.message)) {
-      console.warn(`Leverage set warning (${symbol}):`, err.message);
+      throw new Error(`Failed to set leverage to ${leverage}x for ${symbol}: ${err.message}`);
     }
   }
 
+  const marginType = String(settings.tradeMarginType || "ISOLATED").toUpperCase();
   try {
     await signedRequest(settings, "POST", "/fapi/v1/marginType", {
       symbol,
-      marginType: settings.tradeMarginType,
+      marginType,
     });
   } catch (err) {
     if (!/No need to change/i.test(err.message)) {
-      console.warn(`Margin type warning (${symbol}):`, err.message);
+      throw new Error(`Failed to set margin type for ${symbol}: ${err.message}`);
     }
   }
+
+  return leverage;
 }
 
 async function loadTradeLog() {
@@ -285,13 +329,47 @@ async function cancelOpenOrders(settings, symbol) {
       console.warn(`Cancel open orders (${symbol}):`, err.message);
     }
   }
+
+  try {
+    await signedRequest(settings, "DELETE", "/fapi/v1/algoOpenOrders", { symbol });
+  } catch (err) {
+    if (!/No such order|Unknown order/i.test(err.message)) {
+      console.warn(`Cancel algo orders (${symbol}):`, err.message);
+    }
+  }
+}
+
+async function placeAlgoConditionalOrder(settings, params) {
+  const payload = {
+    algoType: "CONDITIONAL",
+    workingType: "MARK_PRICE",
+    timeInForce: "GTC",
+    ...params,
+  };
+  if (payload.triggerPrice != null) {
+    payload.triggerPrice = formatTriggerPrice(payload.triggerPrice);
+  }
+  return signedRequest(settings, "POST", "/fapi/v1/algoOrder", payload);
+}
+
+function tpSlTriggerPrices(direction, entryPrice, tpPct, slPct, tickSize) {
+  if (direction === "long") {
+    return {
+      tp: roundPrice(entryPrice * (1 + tpPct / 100), tickSize),
+      sl: roundPrice(entryPrice * (1 - slPct / 100), tickSize),
+    };
+  }
+  return {
+    tp: roundPrice(entryPrice * (1 - tpPct / 100), tickSize),
+    sl: roundPrice(entryPrice * (1 + slPct / 100), tickSize),
+  };
 }
 
 /**
  * Place take-profit and stop-loss as close-position market triggers.
  * direction: "long" | "short"
  */
-async function placeTpSlOrders(settings, { symbol, direction, entryPrice }) {
+async function placeTpSlOrders(settings, { symbol, direction, entryPrice, quantity }) {
   const tpPct = Number(settings.tradeTpPercent) || 0;
   const slPct = Number(settings.tradeSlPercent) || 0;
   if (tpPct <= 0 && slPct <= 0) return [];
@@ -299,41 +377,45 @@ async function placeTpSlOrders(settings, { symbol, direction, entryPrice }) {
   const filters = await getSymbolFilters(settings, symbol);
   const closeSide = direction === "long" ? "SELL" : "BUY";
   const placed = [];
+  const { tp, sl } = tpSlTriggerPrices(direction, entryPrice, tpPct, slPct, filters.tickSize);
+
+  let closeQty = quantity;
+  if (!closeQty || closeQty <= 0) {
+    const position = await getOpenPosition(settings, symbol, { side: direction, timeoutMs: 3000 });
+    closeQty = roundStep(position.quantity, filters.stepSize);
+    entryPrice = position.entryPrice;
+  } else {
+    closeQty = roundStep(closeQty, filters.stepSize);
+  }
+
+  if (!closeQty || closeQty <= 0) {
+    throw new Error(`No open ${direction} position to attach TP/SL on ${symbol}`);
+  }
 
   await cancelOpenOrders(settings, symbol);
 
   if (tpPct > 0) {
-    const tpRaw =
-      direction === "long"
-        ? entryPrice * (1 + tpPct / 100)
-        : entryPrice * (1 - tpPct / 100);
-    const stopPrice = roundPrice(tpRaw, filters.tickSize);
-    const order = await signedRequest(settings, "POST", "/fapi/v1/order", {
+    const order = await placeAlgoConditionalOrder(settings, {
       symbol,
       side: closeSide,
       type: "TAKE_PROFIT_MARKET",
-      stopPrice,
-      closePosition: "true",
-      workingType: "MARK_PRICE",
+      triggerPrice: tp,
+      quantity: closeQty,
+      reduceOnly: "true",
     });
-    placed.push({ action: "take_profit", stopPrice, percent: tpPct, order });
+    placed.push({ action: "take_profit", stopPrice: tp, percent: tpPct, quantity: closeQty, order });
   }
 
   if (slPct > 0) {
-    const slRaw =
-      direction === "long"
-        ? entryPrice * (1 - slPct / 100)
-        : entryPrice * (1 + slPct / 100);
-    const stopPrice = roundPrice(slRaw, filters.tickSize);
-    const order = await signedRequest(settings, "POST", "/fapi/v1/order", {
+    const order = await placeAlgoConditionalOrder(settings, {
       symbol,
       side: closeSide,
       type: "STOP_MARKET",
-      stopPrice,
-      closePosition: "true",
-      workingType: "MARK_PRICE",
+      triggerPrice: sl,
+      quantity: closeQty,
+      reduceOnly: "true",
     });
-    placed.push({ action: "stop_loss", stopPrice, percent: slPct, order });
+    placed.push({ action: "stop_loss", stopPrice: sl, percent: slPct, quantity: closeQty, order });
   }
 
   return placed;
@@ -345,21 +427,24 @@ function entryPriceFromOrder(order, fallbackPrice) {
   return fallbackPrice;
 }
 
-async function quantityFromUsdt(settings, symbol, usdt) {
+async function quantityFromUsdt(settings, symbol, marginUsdt) {
+  const leverage = Math.round(Number(settings.tradeLeverage) || 1);
+  const notionalUsdt = marginUsdt * leverage;
   const price = await getMarkPrice(settings, symbol);
   const filters = await getSymbolFilters(settings, symbol);
-  let qty = roundStep(usdt / price, filters.stepSize);
+  let qty = roundStep(notionalUsdt / price, filters.stepSize);
 
   if (qty < filters.minQty) {
     throw new Error(`Quantity ${qty} below min ${filters.minQty} for ${symbol}`);
   }
   if (qty * price < filters.minNotional) {
     throw new Error(
-      `Notional $${(qty * price).toFixed(2)} below min $${filters.minNotional} for ${symbol}`
+      `Notional $${(qty * price).toFixed(2)} below min $${filters.minNotional} for ${symbol} ` +
+        `(margin $${marginUsdt} × ${leverage}x = $${notionalUsdt.toFixed(2)})`
     );
   }
 
-  return { quantity: qty, price };
+  return { quantity: qty, price, leverage, marginUsdt, notionalUsdt };
 }
 
 /**
@@ -368,8 +453,8 @@ async function quantityFromUsdt(settings, symbol, usdt) {
  *  - long_only: BUY opens/adds long, SELL closes long
  *  - reversal: BUY goes long (closes short first), SELL goes short (closes long first)
  */
-async function executeSignalTrade({ coin, signal, settings, analysis }) {
-  if (!settings.autoTradeEnabled) {
+async function executeSignalTrade({ coin, signal, settings, analysis, manual = false }) {
+  if (!manual && !settings.autoTradeEnabled) {
     return { skipped: true, reason: "Auto-trade disabled" };
   }
   if (!settings.binanceApiKey || !settings.binanceApiSecret) {
@@ -385,7 +470,8 @@ async function executeSignalTrade({ coin, signal, settings, analysis }) {
   await ensureLeverage(settings, symbol);
 
   const mode = settings.tradeMode || "long_only";
-  const usdt = settings.tradeAmountUsdt;
+  const marginUsdt = settings.tradeAmountUsdt;
+  const leverage = Math.round(Number(settings.tradeLeverage) || 1);
   const positionAmt = await getPositionAmt(settings, symbol);
   const actions = [];
 
@@ -403,19 +489,31 @@ async function executeSignalTrade({ coin, signal, settings, analysis }) {
     }
 
     if (mode === "long_only" || mode === "reversal") {
-      const { quantity, price } = await quantityFromUsdt(settings, symbol, usdt);
+      const { quantity, price, notionalUsdt } = await quantityFromUsdt(
+        settings,
+        symbol,
+        marginUsdt
+      );
       const order = await placeMarketOrder(settings, {
         symbol,
         side: "BUY",
         quantity,
       });
-      const entryPrice = entryPriceFromOrder(order, price);
-      actions.push({ action: "open_long", quantity, price: entryPrice, order });
+      const position = await getOpenPosition(settings, symbol, { side: "long" });
+      const entryPrice = position.entryPrice;
+      actions.push({
+        action: "open_long",
+        quantity: position.quantity,
+        price: entryPrice,
+        notionalUsdt,
+        order,
+      });
 
       const tpSl = await placeTpSlOrders(settings, {
         symbol,
         direction: "long",
         entryPrice,
+        quantity: position.quantity,
       });
       actions.push(...tpSl);
     }
@@ -445,19 +543,31 @@ async function executeSignalTrade({ coin, signal, settings, analysis }) {
         });
         actions.push({ action: "close_long", order });
       }
-      const { quantity, price } = await quantityFromUsdt(settings, symbol, usdt);
+      const { quantity, price, notionalUsdt } = await quantityFromUsdt(
+        settings,
+        symbol,
+        marginUsdt
+      );
       const order = await placeMarketOrder(settings, {
         symbol,
         side: "SELL",
         quantity,
       });
-      const entryPrice = entryPriceFromOrder(order, price);
-      actions.push({ action: "open_short", quantity, price: entryPrice, order });
+      const position = await getOpenPosition(settings, symbol, { side: "short" });
+      const entryPrice = position.entryPrice;
+      actions.push({
+        action: "open_short",
+        quantity: position.quantity,
+        price: entryPrice,
+        notionalUsdt,
+        order,
+      });
 
       const tpSl = await placeTpSlOrders(settings, {
         symbol,
         direction: "short",
         entryPrice,
+        quantity: position.quantity,
       });
       actions.push(...tpSl);
     }
@@ -471,8 +581,9 @@ async function executeSignalTrade({ coin, signal, settings, analysis }) {
     symbol,
     signal,
     mode,
-    usdt,
-    leverage: settings.tradeLeverage,
+    marginUsdt,
+    notionalUsdt: marginUsdt * leverage,
+    leverage,
     tpPercent: settings.tradeTpPercent,
     slPercent: settings.tradeSlPercent,
     testnet: Boolean(settings.binanceTestnet),
@@ -480,10 +591,11 @@ async function executeSignalTrade({ coin, signal, settings, analysis }) {
     actions: actions.map((a) => ({
       action: a.action,
       quantity: a.quantity,
+      notionalUsdt: a.notionalUsdt,
       price: a.price,
       stopPrice: a.stopPrice,
       percent: a.percent,
-      orderId: a.order?.orderId,
+      orderId: a.order?.orderId || a.order?.algoId,
       status: a.order?.status,
       avgPrice: a.order?.avgPrice,
     })),
@@ -523,8 +635,53 @@ async function getTradeById(id) {
   return enrichTradeJournalEntry(trade);
 }
 
+async function getRawTradeById(id) {
+  const log = await loadTradeLog();
+  return log.find((t) => t.id === id) || null;
+}
+
+async function rerunTradeById(tradeId, settings) {
+  const prior = await getRawTradeById(tradeId);
+  if (!prior) {
+    throw new Error("Trade not found");
+  }
+  if (prior.signal !== "buy" && prior.signal !== "sell") {
+    throw new Error("This entry has no BUY/SELL signal to trade");
+  }
+
+  const { getCoins } = require("./coinsStore");
+  const coins = await getCoins();
+  const coin = coins.find((c) => c.id === prior.coinId);
+  if (!coin) {
+    throw new Error(`Coin "${prior.coinId}" not found`);
+  }
+
+  const result = await executeSignalTrade({
+    coin,
+    signal: prior.signal,
+    settings,
+    analysis: prior.analysis || null,
+    manual: true,
+  });
+
+  if (result.skipped) {
+    await logTradeSkipped({
+      coinId: coin.id,
+      coinName: coin.name,
+      symbol: futuresSymbol(coin.symbol),
+      signal: prior.signal,
+      reason: result.reason,
+      analysis: prior.analysis || null,
+    });
+    return result;
+  }
+
+  return enrichTradeJournalEntry(result);
+}
+
 module.exports = {
   executeSignalTrade,
+  rerunTradeById,
   testBinanceConnection,
   listTrades,
   getTradeById,

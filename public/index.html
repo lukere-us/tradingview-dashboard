@@ -441,7 +441,7 @@
                   </label>
                   <p id="binanceSecretStatus" class="field-hint">Secret key: not set</p>
                   <label>
-                    Amount per trade (USDT)
+                    Amount per trade (USDT margin)
                     <input
                       type="number"
                       name="tradeAmountUsdt"
@@ -496,7 +496,7 @@
                     />
                   </label>
                   <p class="field-hint">
-                    TP/SL are set from entry price (mark price). Example long: TP +30%, SL −30%.
+                    TP/SL are % price move from actual fill entry (e.g. long TP +20% = entry × 1.20). At 20x, 1% price ≈ 20% margin ROI.
                   </p>
                   <label>
                     Trade mode
